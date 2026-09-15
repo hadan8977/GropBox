@@ -1,150 +1,68 @@
-# GropBox MVP：网页版 Google Drive 文件传输助手
+# Architecture and product boundaries
 
-更新：2026-09-15。状态：已按 Supabase 路线实现首版并通过本地验证；未创建或部署远端项目。本轮更新为 GropBox 全英文简洁界面，移除富文本编辑器及说明性文案，保留纯文本笔记。下文保留架构约束，实际功能、部署步骤与限制以 README 为准。
+GropBox is a browser-based transfer assistant. The interface, repository documentation, and contributor-facing text are English. No desktop executable is required.
 
-## 1. 结论与需求边界
+## Data ownership
 
-推荐采用 **Vercel + Supabase + Google Drive**。网站与轻量接口放在 Vercel；Supabase 提供消息数据库、身份认证与实时订阅；Google Drive 保存附件原文件及聊天/文档归档。浏览器缓存用于快速展示和离线草稿，不是唯一存储。
-
-这是对原方案的数据归属调整：**消息正文也会存入 Supabase**。数据库是在线消息的事实源，Drive 是附件的事实源与消息的异步归档目的地。不能把 Supabase 描述为“只存几个文件 ID 的缓存”，也不做两边同时可编辑的双主同步。
-
-用户不需要购买、维护一台常驻服务器，但部署者需要配置 Vercel、Supabase 项目和 Google OAuth。日常使用者仍只需用 Google 登录网站，不需要注册 Supabase 账号。选型依据是“跨设备流畅优先”，不是“必须永远零费用”。
-
-保留已确认要求：
-
-- 电脑和手机直接使用网页；可提供 PWA，不交付 exe，不要求某台电脑持续开机。开发与 Node.js 自托管运行方式兼顾 Windows、Linux。
-- 单一“发给自己”的时间线；粘贴文字和截图、拖拽/选择多文件、快速回看、置顶、搜索、新建和编辑文档。
-- 接收端打开、回到前台、恢复网络时立即检查最新数据；不等待遍历全部历史或完成 Drive 归档。
-- Drive 根目录只新建一个“传输助手”文件夹；其下分“文件/YYYY-MM”“聊天记录”“文档”，不把用户文件散放根目录。
-- 首次明确授权后尽量自动恢复会话和刷新令牌；不承诺永久免登录或手机锁屏后继续上传。
-
-## 2. 为什么调整，以及为什么选 Supabase
-
-Drive-only 并非不可用：少量记录可通过摘要、缓存和分页优化；每次创建独立记录也能避免并发覆盖。问题是完整历史搜索、条件查询、版本冲突、可靠重试和实时同步都需要自己补齐。原草案“只搜索已加载历史”尤其不符合快速查找的目标。个人几台设备的并发量不是决定性瓶颈，读写路径和实现复杂度才是。
-
-| 比较项 | Vercel + Drive | Vercel + Supabase + Drive | Vercel + D1 + Drive |
-| --- | --- | --- | --- |
-| 最新记录与历史 | Drive 列表/摘要与客户端合并 | 带用户及时间索引的查询 | 带索引的 SQL 查询，同样可行 |
-| 多设备在线更新 | 轮询或另建通知设施 | 集成 Realtime，仍需断线补查 | 需轮询，或另行实现浏览器通知服务 |
-| 搜索与编辑冲突 | 自建索引与版本合并 | PostgreSQL 查询、事务、版本条件更新 | SQLite 查询与条件更新，并非不支持个人并发 |
-| 登录和数据隔离 | OAuth 库 + Drive 权限 | Supabase Auth + 行级权限 RLS | 另行集成登录、API 鉴权和用户隔离 |
-| Vercel 接入 | 初期少，消息同步层较复杂 | 多配置一个托管项目，配套能力完整 | 能经 REST 访问；原生绑定需 Worker，实时通道需另设计 |
-| 本项目选择 | 不再作为主路线 | **首选** | 低成本且不能接受 Supabase 闲置暂停时的备选 |
-
-Supabase 的优势是现成组件契合本产品，不是声称 PostgreSQL 在所有场景都比 D1 快。Realtime 同样有授权和吞吐开销，不能据此承诺无限并发。[Supabase Realtime](https://supabase.com/docs/guides/realtime/postgres-changes)
-
-D1 支持 Workers Binding 和 REST 查询，因此“Vercel 根本不能用 D1”不成立。官方将 Binding 定位于数据平面，REST 主要用于控制平面；本项目不优先把控制平面接口作为高频聊天查询通道。若改选 D1，更自然的组合是 Cloudflare Workers + D1 + Drive，但会改变当前 Vercel 优先的部署路线，还需要补齐身份和在线通知。[D1 查询方式](https://developers.cloudflare.com/d1/best-practices/query-d1/)
-
-## 3. 免费额度与实际取舍
-
-- Supabase Free：每项目 500 MB 数据库、5 GB 出站流量、200 个峰值实时连接、每月 200 万条实时消息。不把附件放进 Supabase Storage；500 MB 不是单个附件大小限制。对个人 MVP 是合理起点，但容量要计入索引、富文本和归档任务，不按纯文本大小承诺可存多少年。
-- **Supabase 免费项目闲置一周会暂停**。恢复不能当成普通冷启动，更不能保证打开网页即可自动唤醒。若“闲置很久仍随时可用”是正式产品要求，应预算不闲置暂停的 Pro，目前从 $25/月起；这不是整个系统的全部费用，也不是网络可用性 SLA。不用保活请求伪装正常业务绕过免费限制。[Supabase 定价](https://supabase.com/pricing)
-- D1 Free：账户总存储 5 GB，但**单库限 500 MB**；每天 500 万行读取、10 万行写入，索引也影响计数，用尽日额度会查询失败。不能把“5 GB 免费”误读成一个 5 GB 的免费数据库。[D1 定价](https://developers.cloudflare.com/d1/platform/pricing/)、[D1 限制](https://developers.cloudflare.com/d1/platform/limits/)
-- 大文件从浏览器直接分块上传 Drive，不经过 Vercel 或 Supabase。Vercel 的 5 GB Beta 指函数部署包体积，不是文件上传上限，本应用无需使用该能力。[Vercel 函数限制](https://vercel.com/docs/functions/limitations)
-- 个人试用从免费套餐开始；公开商业运营另行核对 Vercel 套餐用途约束和各服务额度，不将“可部署”写成“永久免费运营”。
-
-## 4. 技术路线与数据分工
-
-保留 Next.js App Router、React、TypeScript、Dexie/IndexedDB、Google Drive v3。改用 Supabase PostgreSQL、Supabase Auth（Google provider）及 Realtime；替换早期 NextAuth 路径，不并存两套登录身份。优先使用官方客户端和标准 SQL，不增加 Redis、独立搜索集群或常驻进程。
-
-| 位置 | 职责与数据 |
+| Component | Responsibility |
 | --- | --- |
-| Vercel | 网页、OAuth 回调、Google 令牌续期、短批次归档任务；不长期保存业务文件 |
-| Supabase | 消息/文档正文、附件元数据、目录 ID、查询索引、版本、归档任务、受限加密凭据 |
-| Google Drive | 附件原文件；聊天和文档的异步归档/导出，全部位于应用目录内 |
-| 浏览器 IndexedDB | 按账号隔离的近期缓存、草稿、待发送队列和上传断点；不存 Google token 或大附件 |
+| Next.js / Vercel | Web interface, authenticated APIs, OAuth callback, token renewal, bounded archive jobs |
+| Supabase | Google sign-in, Realtime, authoritative message/note content, attachment metadata, version checks, archive queue, encrypted provider credentials |
+| Google Drive | Original attachments and asynchronous JSON archives |
+| Browser IndexedDB | Per-account recent history, drafts, outbox, upload checkpoints; no Google tokens or large file blobs |
 
-数据库按职责组织：
+Supabase is not just an index of Drive IDs. Drive is not a second editable message database. Direct edits to archives are not imported back.
 
-- 消息/文档：正文、富文本结构、派生搜索文本、类型、置顶、服务端时间、版本和删除标记。正文/摘要/搜索字段经同一写入路径一致更新。
-- 附件：所属用户、消息关联、Drive ID、文件名、类型、大小和传输状态。文件字节只写 Drive；不能信任客户端随意关联其他账号的附件。
-- 工作区：应用目录及子目录 ID；名称用于展示，ID 和归属用于定位。初始化采用幂等创建，避免两台设备并发生成两个应用根目录。
-- 幂等写入/归档任务：事务保存操作 ID、对应版本快照、稳定 Drive 文件 ID 和任务状态，用于去重和异步归档；不另建完整事件溯源框架。
-- Google 凭据：服务端受限存储中加密保存 refresh token，密钥在部署环境；不进入客户端可读表、实时发布或业务导出。
+Files live under `GropBox/Files/YYYY-MM`; versioned message and note archives use `History` and `Notes`. Stored Drive IDs, not folder names, identify resources. Legacy internal IDs stay unchanged to preserve existing drafts and folders.
 
-## 5. 流畅度、查询与一致性契约
+## Interaction and synchronization
 
-### 打开与跨设备同步
+- One self-chat timeline with plain text, notes, files, search, pinning, edits, and logical deletion.
+- Consecutive bubbles have a 4 px gap. A five-minute gap or local date change starts a time group. New-message counts are session-local, not persistent cross-device read receipts.
+- Cache-first rendering and a virtual list keep recent history accessible without scanning Drive.
+- Realtime signals trigger an authenticated re-query. Reconnection, foregrounding, and periodic checks reconcile missed changes; polling falls back to approximately four seconds in the foreground.
+- Latest pages use 30 records. Cursor pagination uses server timestamps and IDs; repeat syncs compare versions before fetching changed bodies.
+- Writes enter a durable local outbox. Only database acknowledgement means sent; only archive completion means archived.
+- Operation IDs deduplicate retries. Atomic expected-version checks preserve conflicting local drafts instead of silently overwriting remote edits.
+- Search matches message text, note titles, and filenames across online history, with at most 100 results. Offline search covers cached records. Short substrings may require scans. No attachment-body search, OCR, or semantic search.
 
-1. 先展示本账号缓存，明确它是缓存；并行请求最新一页和建立订阅，不等 Drive 扫描、原图或全部历史。
-2. 订阅建立后再补查最新数据，消除订阅与首屏查询间的空窗；按稳定消息 ID 和版本去重。
-3. Realtime 是更新通知，不是可靠消息队列。重连、回到前台、网络恢复时查询最新页，并重新验证已加载的可见记录；其余旧缓存标记过期，浏览时校验。
-4. 公司网络不允许 WebSocket、但允许 Supabase HTTPS 时，前台降级为约 3–5 秒间隔的短轮询；后台降频或暂停。降级状态不能仍承诺两秒内同步。
-5. 使用服务端时间与 ID 的游标分页，不使用深 OFFSET；最新页约 30 条，首屏批量读取正文，重复同步先比对轻量版本信息，仅重新读取变更正文；图片随可见消息加载，长时间线使用虚拟列表限制渲染节点数量。
+## Files and archives
 
-性能目标而非已验证承诺：本地操作反馈约 100 ms 内、缓存首屏约 500 ms 内；有效会话、服务未暂停、两端在线、正常网络下，从消息提交成功到另一端显示的 P95 目标为 2 秒内。首次登录、冷启动、上传耗时分别测量。按实际网络选择数据库区域，需要访问数据库的 Vercel 函数就近部署。
+Uploads go directly from browser to Drive in 8 MiB chunks, with up to two concurrent uploads and 30 queued files. A file becomes visible on other devices after upload completion and Send. Upload progress is not a delivery receipt.
 
-### 写入、离线和并发
+Reopening a paused upload may require selecting the original file again. Background tabs and locked phones may suspend work. File downloads use streaming where supported, otherwise bounded buffers or the Drive page.
 
-- 新消息进入本地待发送队列并显示“发送中”；仅数据库确认持久化后标记“已发送”，不把动画或缓存写入当作成功。
-- 客户端操作 ID 在数据库事务中去重；请求超时后重试不能生成两条相同消息。
-- 编辑携带期望版本，数据库原子条件更新；版本不符保留本地草稿并提示比较/另存，不静默覆盖另一台设备。首版不做多人协同或 CRDT。
-- 离线保留草稿和排队，恢复后重试；冲突编辑不能自动覆盖。退出时处理未发送内容并清理该账号缓存，不能串号展示。
-- 逻辑删除可被其他设备查询到；默认不连带删除 Drive 附件和既有归档，并在界面说明，这不是“彻底删除所有副本”。
+Archiving is queued in the same transaction as a message mutation. Online requests process bounded batches; Vercel's daily cron supplements them. Leases, retries, and stable IDs protect against interrupted jobs. Archive lag is possible; JSON archives are not a complete database backup or an automatic restore facility.
 
-### 搜索
+Deletion hides the timeline entry, but does not delete Drive originals or prior archives. Signing out clears this device's drafts, cache, and upload checkpoints, not cloud content or other sessions.
 
-- 服务器搜索覆盖该用户全部未删除消息文本、文档标题和附件名，不再只搜已加载记录。离线搜索限缓存并标明范围。
-- MVP 做字面子串搜索，使用参数化查询和通配符转义；按用户/时间索引过滤，可用 pg_trgm 的 GIN 索引加速 ILIKE，不宣称语义搜索。
-- PostgreSQL 默认全文搜索不等于完善的中文分词。1–2 字等无法提取有效 trigram 的模式可能退化为扫描；限制返回条数和查询耗时，测试中文样例，不承诺所有关键词都命中索引。[PostgreSQL pg_trgm](https://www.postgresql.org/docs/current/pgtrgm.html)
-- 不搜索 PDF/Office 等附件正文，不引入 OCR 或额外搜索服务。
+## Security boundaries
 
-## 6. Drive 文件与聊天归档
+- Google OAuth uses PKCE and the minimum `drive.file` scope. Provider refresh tokens are encrypted with AES-256-GCM and removed from browser session/cookie output.
+- Supabase RLS isolates accounts. Credential and archive tables are not browser-readable or published to Realtime. Server APIs still validate ownership when using service credentials.
+- Allowlisting controls sign-in and API admission. To disable an existing account's online database access, set `app_accounts.active=false`; removing an email alone does not revoke issued tokens or erase device caches.
+- Requests validate origin, content size/format, attachment ownership, and Google upload URL destinations. HTML/SVG uploads are not executed as app content. API responses are not publicly cached.
+- This is not end-to-end encryption: authorized database administrators can read message content. Transfer only data you are authorized to move.
 
-- 附件采用 resumable 分块直传、进度、取消、退避重试和断点查询，使用稳定文件 ID。重新打开网页后可能需要重新选择源文件；不把大文件整体写入 IndexedDB。[Drive 上传协议](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
-- 上传完成并确认 Drive 元数据后才标记可下载；首版上传进度仅显示在发送设备，上传完成并发送后，接收端才看到对应消息和附件。不为每个上传块写数据库。
-- 上传成功但消息关联失败时保留任务用于重试绑定，不自动删除文件。下载优先流式保存，不支持时交给 Drive 下载页，不把几 GB 文件整体读入内存。
-- 消息提交与归档任务在同一数据库事务持久化；发送不等待 Drive。界面区分“已发送”和“已归档到 Drive”，归档失败显示待重试。
-- 在线时自动触发有时长/条数上限的服务端归档批次；关闭页面或函数中断不会丢失待办。用租约、退避和稳定文件 ID 防止重复处理；按版本写独立 JSON，避免旧任务覆盖新内容。
-- Vercel 日级 Cron 补做待归档任务。Hobby 每个任务仅支持每天执行一次且调度不精确，不能用于实时聊天同步或秒级归档保证。数据库暂停、Google 撤权、任务积压、配置缺失或额度不足都可能延迟归档，必须明确显示；不依赖函数返回后未持久化的后台 Promise。[Vercel Cron 限制](https://vercel.com/docs/cron-jobs/usage-and-pricing)
-- 归档 JSON 包含格式版本、稳定消息/操作 ID、正文、附件引用、版本和删除标记。笔记可下载为 TXT，已有 Markdown 记录保留 MD 格式；Drive 归档不是完整数据库备份，首版不做自动整库恢复或直接编辑 Drive 文件后的双向回写。
+## Availability and verification
 
-## 7. 产品、代码与安全 Review
+Free services have quotas and may pause after inactivity; consult [Supabase pricing](https://supabase.com/pricing) and [Vercel plans](https://vercel.com/docs/plans). Do not promise permanent free availability or work around plan restrictions with artificial keepalive traffic.
 
-### 产品
+Google consent is required initially. Sessions can renew, but revoked grants, policy changes, or expired refresh tokens require reconnection. [External OAuth apps in Testing can issue seven-day refresh tokens](https://developers.google.com/identity/protocols/oauth2#expiration) when Drive access is requested.
 
-单对话交互参考微信文件助手，文件选择/分享和记录浏览参考 PairDrop、Memos；不宣称已实测微信登录后的界面。普通发送不要求选择接收设备、目录或起标题。界面只保留必要英文标签，状态用图标及辅助标签表达，不显示宣传口号或存储原理说明。输入框处理好中文输入法、快捷键和手机软键盘；缓存、发送、上传、归档状态分别表达。
+The current offline cold-start page requires reconnection to reopen the full app. PWA share-target input accepts text and links, not arbitrary shared files. There is no local-network device discovery, Office editor, collaborative editing, or background-upload guarantee.
 
-新建纯文本笔记使用独立编辑视图，支持本地草稿和明确远端保存状态。首版不含 Office 格式编辑、多人协作、OCR、原生 App 或后台锁屏上传保证。
+```sh
+npm test
+npm run build
+```
 
-### 代码
+The build includes TypeScript checks. Unit tests include a local PostgreSQL-compatible PGlite migration/RLS test; they do not prove a deployed Supabase instance is configured.
 
-UI/编辑器、领域校验、Supabase 查询/同步、Drive 传输、浏览器缓存、服务端授权/归档分模块。数据库负责原子性和权限，UI 不承载事务与上传状态机。严格 TypeScript，使用项目锁文件；不为备选 D1 提前建设多数据库适配框架。
+`npm run test:e2e` starts its own server on port 3100. With an existing Chrome installation, set `PLAYWRIGHT_CHANNEL=chrome` (PowerShell: `$env:PLAYWRIGHT_CHANNEL='chrome'`). Otherwise install the project's Playwright Chromium browser first. Provider traffic is mocked only in tests; mobile viewport emulation is not an iOS Safari device test.
 
-替换 Drive-only 消息索引、客户端分叉合并与 NextAuth 身份路径，保留可复用的上传、富文本校验和缓存逻辑。只留一个主实现，不因已有代码投入而维持两套事实源。
+Real Google sign-in, deployed RLS/Realtime, company-network access, phone behavior, and multi-gigabyte transfers require real accounts and devices. Do not claim measured latency or real 5 GB upload success from local mocks.
 
-### 登录与凭据
+## Design references
 
-- 一套 Supabase Auth + Google OAuth PKCE 流程，只申请基础身份及 drive.file。已有 Google 登录态可以减少操作，但不能替代首次应用授权。
-- Supabase 应用会话自动续期不代表 Google Drive 授权自动刷新。Google refresh token 由服务端回调取得并加密保存，access token 到期由服务端续期，只提供给当前已认证用户并在浏览器内存使用。[Google 登录](https://supabase.com/docs/guides/auth/social-login/auth-google)、[提供方令牌说明](https://supabase.com/docs/guides/auth/social-login)
-- 回调持久化应用会话前剥离 Google provider token/refresh token，避免它们随 SDK 默认 session 写进浏览器可读存储；测试实际 Cookie/session 输出。登录响应没有新 refresh token 时保留已有有效凭据，身份不匹配不能复用。
-- 官方 Supabase 浏览器/SSR 会话需要客户端参与续期，不能沿用旧计划“全部会话是加密 HttpOnly Cookie”的描述。Google 凭据在服务端隔离，应用会话按官方机制配置 Secure/SameSite，并重点防御 XSS。[SSR 会话说明](https://supabase.com/docs/guides/auth/server-side/advanced-guide)
-- 常规打开不强制 consent；首次获取离线授权或重新连接时才请求。撤权、浏览器清理数据、组织策略、令牌失效时提示重新连接；Google OAuth 外部应用 Testing 状态下涉及 Drive 权限的 refresh token 可能七天到期，部署说明必须覆盖。[Google OAuth](https://developers.google.com/identity/protocols/oauth2)
-- 退出当前设备使用明确的本地会话范围，不意外注销其他设备；首版不做设备管理中心，不承诺已签发访问令牌瞬时失效。
-
-### 数据与服务边界
-
-- 所有业务表启用 RLS；读取、关联和事务接口均根据验证过的身份检查归属，不只依赖客户端 user_id 或订阅过滤器。限制直接写表绕过版本/幂等规则。
-- 凭据表禁止浏览器角色读取，不加入实时发布；service role/secret key 不进入 NEXT_PUBLIC 环境变量。服务端管理权限接口仍检查调用者与资源归属。
-- 首版仅“发给自己”，无公开分享链接。个人部署若配置账号白名单，必须在 API/数据库边界生效，不能只隐藏登录按钮。
-- 校验正文尺寸、富文本节点/深度、附件 ID、分页和搜索参数；安全渲染并限制链接协议，不执行上传的 HTML/SVG。预览、导出、重试遵循相同校验规则。
-- 携带 token 前校验 Google resumable 地址的协议、主机、路径。OAuth 回调地址固定或同源验证；Cookie 写接口检查来源/CSRF，Cron 单独验密。
-- 日志不记录消息正文、令牌和完整敏感上游响应；授权、消息、令牌接口禁止公共缓存，Service Worker 不缓存这些 API。
-- 这不是端到端加密方案：Supabase 的消息正文需要可查询，有权限的部署管理员和托管服务属于信任边界。只用于有权传输的内容，不绕过企业数据防护策略。
-
-Review 结论：数据库方案更符合流畅和完整搜索要求，去掉自制 Drive 消息索引/版本合并；新增重点风险是 RLS、提供方令牌隔离、事务幂等和跨服务归档失败。公司网络可达性、免费项目暂停和真实端到端延迟仍是待验证条件。
-
-## 8. 调整后的 MVP 执行计划
-
-1. **统一数据与身份基础。** 增加 schema/RLS/事务写入及必要索引，切换 Supabase Auth，接入 Google 凭据安全保存和续期；替换旧消息同步模型，保留可复用的 Drive 上传与缓存。尽早确认公司电脑和手机对网站、Supabase HTTPS/WebSocket、Google OAuth/API 的访问；Drive 网页可登录不能替代这些检查。
-2. **先打通两设备消息主链路。** 最新时间线、乐观反馈、幂等发送、实时订阅与重连补查、历史分页、全历史文本搜索、编辑冲突保护。先验证消息流畅度，再扩展附件和文档界面。
-3. **接入文件与编辑体验。** 多文件拖拽、截图粘贴、上传队列、预览/下载、置顶和文档编辑；单根目录、月度附件和持久归档队列；完成移动端触控/键盘和支持范围内的 PWA 分享。
-4. **针对风险验证并交付。** 测试账号隔离、重复请求、并发编辑、断线补查、中文搜索、令牌刷新/不泄露、上传重试、归档中断恢复；执行相关类型/生产构建和关键桌面/移动浏览器流程。提供 Vercel/Supabase/Google 配置、SQL 迁移入口与 Windows/Linux 运行说明；真实环境可用时才报告跨设备 P95。
-
-## 9. 本轮范围与实施停止条件
-
-本轮已替换旧 Drive-only 消息模型和 NextAuth 路径，接入 Supabase 身份、事务写入、RLS、实时订阅、Drive 传输/归档、网页交互与本地验证。未执行线上数据库迁移；GitHub 上传单独按用户授权处理。PWA 当前只接收文本/链接分享；上传中的文件仅显示本机队列，上传完成并发送后才进入跨设备时间线。
-
-本地证据：`npm test` 通过 21 项测试，覆盖领域校验、本地待发队列、令牌隔离、SQL 权限与事务、分块协议等；`npm run build` 通过生产构建及 TypeScript 检查；使用系统 Chrome 的 `npm run test:e2e` 通过 18 项桌面/手机视口流程，并补查搜索结果在视口内可见。浏览器测试中的 Google/Supabase 请求为模拟，跨浏览器同步测试覆盖轮询补查，不等同于真实 Realtime 或手机 Safari 验证；大于 5 GiB 的分块协议测试不等同于真实大文件上传。
-
-实施完成标准：网站具有完整真实主路径、相关本地测试和生产构建通过、部署说明齐全；未配置服务时显示真实提示，不提供伪登录或伪发送成功。真实 OAuth、部署后的 RLS/Realtime、Drive 大文件及公司电脑/手机性能需要项目凭据和设备；缺少时标为未验证，不以 mock 测试代替。实际部署、远端迁移和付费升级需明确目标与授权。
+The web interface adapts navigation-layer material, restraint, and motion principles from [Apple Design Skill](https://github.com/naplesblue/apple-design-skill), [Liquid Glass Skills](https://github.com/SohrabZ/liquid-glass-skills), and [Awesome Liquid Glass](https://github.com/GetStream/awesome-liquid-glass). CSS glass is not Apple's native material renderer; reduced motion, transparency, and contrast preferences have explicit fallbacks.

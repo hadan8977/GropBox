@@ -15,7 +15,7 @@ describe("content and transfer boundaries", () => {
   });
   it("checks format and UTF-8 payload size, not just character count", () => {
     expect(mutationSchema.safeParse({ ...input(), body: "text" }).success).toBe(false);
-    expect(mutationSchema.safeParse({ ...input(), format: "text", body: "中".repeat(70_000) }).success).toBe(false);
+    expect(mutationSchema.safeParse({ ...input(), format: "text", body: "\u20ac".repeat(70_000) }).success).toBe(false);
     expect(mutationSchema.safeParse(input()).success).toBe(true);
     for (const body of [undefined, null, 42, { type: "doc", content: "invalid" }]) expect(mutationSchema.safeParse({ ...input(), body }).success).toBe(false);
   });
@@ -30,9 +30,9 @@ describe("content and transfer boundaries", () => {
   it("keeps conflict drafts visible rather than replacing them with remote state", () => {
     const m = input(), time = "2026-09-15T12:00:00.000Z";
     const remote: Message = { ...m, user_id: "user", created_at: time, updated_at: time, version: 2, archive_version: 1 };
-    const pending = { mutation: { ...m, format: "text" as const, body: "本机修改" }, createdAt: time, error: "conflict" };
+    const pending = { mutation: { ...m, format: "text" as const, body: "Local edit" }, createdAt: time, error: "conflict" };
     const result = mergeMessages([remote], [pending], "user");
-    expect(result).toHaveLength(1); expect(result[0]).toMatchObject({ body: "本机修改", version: 2, pending: true, error: "conflict" });
+    expect(result).toHaveLength(1); expect(result[0]).toMatchObject({ body: "Local edit", version: 2, pending: true, error: "conflict" });
     expect(mergeMessages([{ ...remote, deleted: true }], [], "user")).toEqual([]);
   });
   it("escapes wildcard characters in literal search", () => { expect(escapeLike("100%_a\\b")).toBe("100\\%\\_a\\\\b"); });

@@ -6,7 +6,7 @@ import { type Mutation, type Message } from "@/lib/model";
 
 const user1 = "11111111-1111-4111-8111-111111111111", user2 = "22222222-2222-4222-8222-222222222222";
 const db = new PGlite({ extensions: { pg_trgm } });
-const mutation = (): Mutation => ({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", title: "", body: "中文搜索与跨设备同步", attachments: [], pinned: false, deleted: false });
+const mutation = (): Mutation => ({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", title: "", body: "Search across devices \u641c\u7d22", attachments: [], pinned: false, deleted: false });
 async function save(m: Mutation, user = user1, hash = JSON.stringify(m)) {
   return (await db.query<{ message: Message }>("select public.save_message($1,$2::jsonb,$3,$4) as message", [user, JSON.stringify(m), String(m.body), hash])).rows[0].message;
 }
@@ -31,7 +31,7 @@ describe("migration, permission and transaction behavior on local PostgreSQL (PG
   });
   it("rejects stale concurrent edits and preserves the winning version", async () => {
     const m = mutation(); await save(m);
-    const edits = ["设备一", "设备二"].map((body) => ({ ...m, operationId: crypto.randomUUID(), expectedVersion: 1, body }));
+    const edits = ["Device one", "Device two"].map((body) => ({ ...m, operationId: crypto.randomUUID(), expectedVersion: 1, body }));
     const results = await Promise.allSettled(edits.map((m) => save(m)));
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
@@ -67,9 +67,9 @@ describe("migration, permission and transaction behavior on local PostgreSQL (PG
     await db.query("select finish_archive($1,$2,$3)", [user1, job.operation_id, lease]);
     expect((await db.query<{ archive_version: number }>("select archive_version from messages where id=$1", [job.message_id])).rows[0].archive_version).toBe(job.version);
   });
-  it("finds Chinese substrings across history and persists deletion tombstones", async () => {
+  it("finds Unicode substrings across history and persists deletion tombstones", async () => {
     const m = mutation(); await save(m);
-    const results = await db.query("select id from messages where user_id=$1 and search_text ilike $2", [user1,"%搜索%"]);
+    const results = await db.query("select id from messages where user_id=$1 and search_text ilike $2", [user1,"%\u641c\u7d22%"]);
     expect(results.rows).toContainEqual({ id: m.id });
     await save({ ...m, operationId: crypto.randomUUID(), expectedVersion: 1, deleted: true });
     expect((await db.query<{ deleted: boolean }>("select deleted from messages where id=$1", [m.id])).rows[0].deleted).toBe(true);

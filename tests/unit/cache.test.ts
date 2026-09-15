@@ -8,7 +8,7 @@ import type { Mutation } from "@/lib/model";
 let db: DriveCache;
 beforeEach(() => { db = new DriveCache(crypto.randomUUID()); vi.stubGlobal("navigator", { onLine: false }); });
 afterEach(async () => { await db.delete(); vi.unstubAllGlobals(); });
-const mutation = (): Mutation => ({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", body: "离线草稿", title: "", pinned: false, deleted: false, attachments: [] });
+const mutation = (): Mutation => ({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", body: "Offline draft", title: "", pinned: false, deleted: false, attachments: [] });
 
 describe("local outbox transaction", () => {
   it("consumes a draft only in the same transaction as durable enqueue", async () => {
