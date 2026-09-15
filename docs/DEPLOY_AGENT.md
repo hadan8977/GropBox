@@ -1,65 +1,47 @@
-# Agent deployment guide
+# Deploy with an agent
 
-Outcome: deploy the user's own GropBox instance and report a real, usable URL. This guide is not permission to deploy to the upstream maintainer's accounts.
+Your job is to **perform the deployment**, not give the user a deployment checklist. Use the same executable workflow as the manual entry. Read [AGENTS.md](../AGENTS.md), [DEPLOY.md](DEPLOY.md), and [the deployment helper](../scripts/deploy-core.mjs) from the same checkout. Read [the SQL migration](../supabase/migrations/001_gropbox.sql) before approving initialization. Do not start by reciting the dashboard fallback.
 
-## Read and establish scope
+## Establish access, then execute
 
-Read [AGENTS.md](../AGENTS.md), [DEPLOY.md](DEPLOY.md), [.env.example](../.env.example), and the initial [SQL migration](../supabase/migrations/001_gropbox.sql) from the same checkout before acting. Pin the checkout's commit for the deployment; do not mix unreviewed files from another branch. Read [architecture and limits](MVP_PLAN.md) before making availability or security claims.
+1. Confirm only missing decisions: the intended Google email, a new installation versus an existing one, the owning accounts/projects, and the spending limit. A free-tier-only preference is valid, but do not promise unlimited service or silently select paid resources. The helper uses an existing empty Supabase project and creates a new Vercel project; create the Supabase project through authorized provider tools if available, otherwise guide the user through that one dashboard action. Do not ask them for SQL results, table counts, application API keys, or an unassigned domain.
+2. Prefer the user's already authorized provider tools or secure environment for access. This helper currently needs **Supabase and Vercel management tokens**; an MCP connection or normal browser login does not automatically supply those tokens. If necessary, have the user enter short-lived tokens into the hidden prompts in `npm run deploy`. Never ask them to paste tokens or Google client contents into chat. If the agent has no terminal/provider execution capability, say so once and offer the guided command; do not present a long manual checklist as "automation."
+3. Obtain the exact Supabase callback from the selected project. Show only the current [Google setup](DEPLOY.md#google-setup) action that needs the user. With permission, automate supported Google project/API operations; leave client creation, consent, and account verification to the user where required. The user supplies the downloaded Web client JSON by local path. The app's Google callback is Supabase's `/auth/v1/callback`, not the eventual Vercel domain.
+4. Run the helper's read-only plan below. Explain its concrete targets and effects, obtain approval once for those scoped operations if not already authorized, then apply it. Respect the execution environment's own tool approvals. Do not add permission requests for already approved operations or ask the user to perform operations the helper handles.
 
-Start with a compact inventory, not a request for credentials. Ask only what is missing:
+Keep progress updates short: current action or blocker, not a transcript of provider settings. Pause only for a real permission, login, consent, or target decision. Never invent credentials or silently switch projects. Existing deployments must retain their keys and data; use [the dashboard guide](DEPLOY_MANUAL.md) only for the unsupported part, not as the default user workload.
 
-- Does the user already have a GropBox deployment or any Supabase, Google Cloud, GitHub, or Vercel projects to reuse? "None yet" is a valid answer; help create approved missing projects in the order below.
-- Which Google email should be allowed, and which provider accounts/organizations should own the resources? Identify exact project targets when selecting or creating them, not before they exist.
-- Which region and spending limit are approved? Offer free-tier-only as a starting choice, without promising unlimited or always-on service. A custom domain is optional; the user can use Vercel's assigned domain.
+## Executable input
 
-Do not block on a Client ID, API key, project reference, or production URL that has not been created yet. Explain where each will come from at the step that produces it. If the user only has provider accounts, begin at stage 1A of DEPLOY.md.
+For a user at the terminal, run `npm run deploy` and let its hidden prompts collect tokens. For non-interactive execution, obtain `SUPABASE_ACCESS_TOKEN` and `VERCEL_TOKEN` through the environment's secret-input mechanism. Do not embed them in tool arguments, saved scripts, or `.env.local`. The two providers' management tokens are distinct from Supabase's application keys and the database password.
 
-Use authenticated provider tools/CLIs when available and verify the selected account. Creating resources, applying SQL, adding credentials, and deploying need approval for those exact targets. Do not enable paid plans, move domains, change repository visibility, delete resources, or affect other projects without additional authorization.
+Create `.gropbox/deploy-input.json` with **non-secret** inputs after selecting the actual targets. Replace the examples; do not guess IDs or ask the user to create values that a tool can retrieve:
 
-An existing GitHub login is not permission to use that account. An existing Supabase project is not necessarily an empty database. Preserve unrelated working changes and do not switch branches or overwrite environment files to simplify the task.
+```json
+{
+  "supabaseRef": "abcdefghijklmnopqrst",
+  "vercelTeamId": "team_REPLACE_WITH_SELECTED_TEAM",
+  "projectName": "gropbox-your-name",
+  "email": "you@example.com",
+  "googleCredentials": "/absolute/path/to/downloaded-google-client.json"
+}
+```
 
-## Guide the user through each dependency
+On Windows, a JSON path can use forward slashes, such as `C:/Users/you/Downloads/client_secret.json`. The Google file stays private. Do not dump provider responses, state files, or environment values into logs to inspect them.
 
-Keep the dashboard instructions and field mappings in [DEPLOY.md](DEPLOY.md) as the single source of truth. Use this routing order, not three independent provider checklists:
+```sh
+npm run deploy -- --config .gropbox/deploy-input.json
+npm run deploy -- --config .gropbox/deploy-input.json --apply
+```
 
-| Step in DEPLOY.md | What must exist first | Evidence that allows the next step |
-| --- | --- | --- |
-| [1A: Supabase](DEPLOY.md#a-supabase-create-the-database-and-get-its-callback) | Approved owner, region, and project target | Database initialized; URL, keys, and the provider callback located |
-| [1B: Google Cloud](DEPLOY.md#b-google-cloud-create-the-oauth-client) | Supabase callback | Drive API enabled; audience/scopes set; Web client created with that callback |
-| [1C: Supabase Google provider](DEPLOY.md#c-supabase-enable-google-sign-in) | Google client pair | The same client saved to the enabled provider |
-| [2: Local configuration](DEPLOY.md#2-prepare-your-configuration) | Provider values above | Local format check succeeds; existing secrets preserved; domain may still be pending |
-| [3A: Vercel](DEPLOY.md#a-vercel-deploy-and-identify-the-production-domain) | Approved repository/project and configuration | A stable Production domain is confirmed; a first setup-only deployment is not completion |
-| [3B: URLs and redeploy](DEPLOY.md#b-complete-the-urls-and-redeploy) | Confirmed production origin | Local/Vercel config and Supabase URLs aligned; latest Production deployment ready |
-| [3C: Sign-in and verification](DEPLOY.md#c-sign-in-and-verify) | Final URLs and current deployment | Real checks below, or a precise account of what remains unverified |
+The first command checks targets read-only and displays a plan; it does not create resources, change provider configuration, or save installation state. The second authorizes the helper to initialize the selected empty database, create the named Vercel project, configure Google Auth and production environment variables, and deploy. It does not authorize paid-plan upgrades, domain purchases, account administration, deletion, or changes to unrelated resources.
 
-For steps that need the user, provide **one current action at a time**: the dashboard link and selected project, the page/field, the exact non-secret value or safe source for a secret, and what a successful result looks like. Wait for that result before asking for dependent values. For example, while configuring Google, give the Supabase callback already obtained; do not ask the user to find all three providers' credentials at once or merely say "configure OAuth."
+The helper uses fixed official API hosts, imports only client ID/secret from the Google JSON, uploads an explicit set of application/build files, and saves resumable state privately under `.gropbox/`. Do not run a parallel custom provisioning script, overwrite the state, rotate keys, or reapply SQL to work around a refusal. It is first-install/resume automation, not an upgrade or arbitrary-database migration tool.
 
-Use supported provider tools/APIs for approved actions when available. Without those permissions, stay useful: guide the user through the corresponding dashboard step. Do not demand provider management tokens as a prerequisite for manual setup. If labels differ, check the current official provider documentation; do not guess fields or ask for screenshots containing secrets.
+## Verify and hand off
 
-Track non-secret progress in the conversation: selected projects, completed/current step, and the domain if known. On resumption, verify and reuse completed steps; do not restart setup. If blocked, report the exact missing action or permission and why it is needed. Do not produce an unexplained list of missing environment variables as the handoff.
+The helper checks database initialization/RLS/Realtime and waits for the real Vercel build and domain assignment. It **does not** verify Google login, Drive permissions, or second-device sync. Complete those checks with the user's consent at the returned URL: sign in, send one clearly identified test message and small file, download it, and verify arrival on another device. Do not delete user content as cleanup.
 
-## Apply the setup branches safely
+If real provider access or another device is unavailable, mark that check **not verified**. Local simulations mock the cloud APIs and use local PostgreSQL; they do not prove live OAuth, hosting quotas, 5 GB transfers, or mobile background transfers. Do not make the user inspect six tables to substitute for a failed tool check.
 
-- **Existing database:** inspect migration history and schema read-only. A manually run SQL Editor migration may have no CLI migration-history entry; missing history alone is not permission to rerun it. Apply `001_gropbox.sql` once only on the approved new database. If existing objects collide or a previous attempt partly applied, pause and determine the actual state; never drop objects or weaken RLS to get past an error.
-- **Configuration:** run `npm run setup` from the existing checkout root. It preserves `.env.local`; do not force replacement. Have the user enter credentials through a secret manager, provider UI, or local editor—not chat, prompts, command-line arguments, screenshots, or Git. Preserve an existing deployment's encryption key and cron secret. The database password is not a Supabase API key. Reuse the same Google client pair in Supabase and GropBox. Never set server credentials as `NEXT_PUBLIC_*`.
-- **No production domain yet:** follow DEPLOY.md stage 3A's new-project path. The README button omits `APP_URL` on purpose; leave it unset in Vercel for the first deployment. Do not copy the local default, fabricate a domain, or register localhost callbacks for production. Use the domain actually assigned to Production, then complete 3B and redeploy. A local `setup:check` warning about localhost is expected before this step; its printed app callback is not the production callback. The first **Setup required** page is an intermediate state, not success.
-- **Existing project/confirmed domain:** reuse it and set the final URLs before the next deployment; do not remove a working `APP_URL` or take the live app back to setup mode. A domain is confirmed only when assigned to the target project's Production environment. Do not assume a guessed `.vercel.app` name is available or buy/attach a custom domain without approval.
-- **Deployment:** follow the build settings in DEPLOY.md, use `npm ci` and `npm run build`, and deploy only to the approved project. For dashboard builds, inspect the actual Vercel build result; a duplicate local build is not required. Compare the Production environment with the local template without dumping values, then rebuild after environment changes. `setup:check` only reads the local file; it does not verify Vercel settings or provider connectivity. Do not assume a marketplace integration applied SQL or configured OAuth.
-
-When a provider step needs the user to log in or approve consent, pause that step and request the specific action. Do not invent credentials, use someone else's account, or install broad new tooling merely to avoid asking. Do not download and execute unrelated remote scripts.
-
-## Verify the result, then stop
-
-Use the real deployed site and the user's consent. Create only clearly identified test content approved by the user:
-
-- Open the production URL and confirm the Google sign-in entry, not the unconfigured setup screen.
-- Have the user complete Google sign-in. Confirm an allowed account can send a short message and a second authenticated device/session receives it.
-- Upload and download a small test file. Confirm it is under the user's `GropBox` Drive folder, not loose in the root.
-- Confirm the test message's archive completes or report the actual pending/error state. Check RLS and the message Realtime publication through the authorized Supabase tools; use the app's status/behavior to distinguish Realtime from polling.
-- Check unauthenticated APIs reject access and that no server or Google credentials appear in public environment settings, logs, screenshots, or repository changes. Do not dump entire environment variables or token responses to perform this check.
-
-Local PGlite/Playwright tests are supporting evidence, not substitutes for these live checks. Browser tests mock provider traffic. A static screenshot is not a measured sync latency result, and a small-file check is not proof of a 5 GB transfer or mobile background uploading.
-
-If credentials, permissions, a second device, or a real Google consent flow are unavailable, explicitly mark the corresponding check **not verified**. Do not keep generating setup documents or claim success to avoid a blocker. Never delete the user's messages, files, or cloud resources as test cleanup without approval.
-
-Final handoff: production URL, deployed commit, selected provider projects, completed checks, and any exact remaining action. No secrets. Stop when the approved deployment is usable and these checks are complete; do not broaden the task into ongoing monitoring, billing changes, or account administration.
+Hand off the URL, selected projects, completed checks, and any exact remaining action. Stop when the approved deployment is usable, or explain a concrete blocker. Do not expand into billing changes, monitoring, unrelated audits, or a new deployment guide.

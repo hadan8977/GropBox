@@ -1,7 +1,7 @@
 # GropBox
 
 - Keep repository documentation, UI text, and contributor-facing messages in English. Unicode test fixtures are intentional.
-- For deployment tasks, read [docs/DEPLOY_AGENT.md](docs/DEPLOY_AGENT.md) first. Follow [docs/DEPLOY.md](docs/DEPLOY.md) for configuration; do not duplicate it here.
+- For deployment tasks, read [docs/DEPLOY_AGENT.md](docs/DEPLOY_AGENT.md) first. Use `npm run deploy` for first-install/resume automation; [docs/DEPLOY.md](docs/DEPLOY.md) is the user entry, and [docs/DEPLOY_MANUAL.md](docs/DEPLOY_MANUAL.md) is the dashboard fallback. Do not substitute a checklist for executable setup.
 - Use `npm ci` with the lockfile. `npm run setup` creates an ignored local template without replacing existing files; `npm run setup:check` validates local format only.
 - Use targeted `npm test -- <test-file>` checks. `npm run build` includes TypeScript validation. Browser test details and product boundaries are in [docs/MVP_PLAN.md](docs/MVP_PLAN.md).
 - Preserve user changes and stable storage identifiers. Do not rotate existing encryption keys, apply remote migrations, change visibility, incur charges, or deploy without authorization for the specific target.
