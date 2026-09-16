@@ -6,6 +6,7 @@ const config: NextConfig = {
   devIndicators: false,
   async headers() {
     return [
+      { source: "/", headers: [{ key: "X-GropBox-Shell", value: "public" }] },
       {
         source: "/:path*",
         headers: [

@@ -20,33 +20,47 @@ export class SyncEngine {
   private archiveNext = 0;
   private dirty = false;
   private stopped = false;
+  private generation = 0;
   private oldest?: MessageMeta;
   private loaded = new Set<string>();
+  private sessionAccount: string | null = null;
   constructor(public db: DriveCache, private client: SupabaseClient, private userId: string) {}
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getSnapshot = () => this.state;
+  setSessionAccount(account: string | null) {
+    this.sessionAccount = account;
+    if (account === this.userId && this.state.ready) this.connect();
+  }
   private patch(update: Partial<SyncState>) { if (this.stopped) return; this.state = { ...this.state, ...update }; this.listeners.forEach((fn) => fn()); }
   private wake = () => { this.patch({ online: navigator.onLine }); if (!document.hidden && navigator.onLine) void this.sync(); };
 
   async start() {
     this.stopped = false;
+    const generation = ++this.generation;
+    this.patch({ online: navigator.onLine });
     const recent = await this.db.messages.orderBy("created_at").reverse().limit(PAGE_SIZE).toArray();
     recent.forEach((m) => this.loaded.add(m.id));
     await this.reload();
+    if (this.stopped || generation !== this.generation) return;
+    this.connect();
+  }
+  private connect() {
+    if (this.stopped || this.channel || this.sessionAccount !== this.userId) return;
     this.channel = this.client.channel(`messages:${this.userId}`).on("postgres_changes", { event: "*", schema: "public", table: "messages", filter: `user_id=eq.${this.userId}`, select: ["id", "version", "archive_version", "deleted"] }, () => {
       // Re-query, rather than treating change payloads as a durable or complete source of truth.
       void this.sync();
     }).subscribe((status) => { this.patch({ realtime: status === "SUBSCRIBED" }); if (status === "SUBSCRIBED") void this.sync(); });
     window.addEventListener("online", this.wake); window.addEventListener("offline", this.wake); document.addEventListener("visibilitychange", this.wake);
     this.timer = setInterval(() => {
-      if (!document.hidden && navigator.onLine && (!this.state.realtime || !this.state.syncedAt || Date.now() - Date.parse(this.state.syncedAt) > 30_000)) void this.sync();
+      if (!this.syncPromise && !document.hidden && navigator.onLine && (!this.state.realtime || !this.state.syncedAt || Date.now() - Date.parse(this.state.syncedAt) > 30_000)) void this.sync();
     }, 4000);
-    await this.sync();
+    void this.sync();
   }
   stop() {
-    this.stopped = true; clearInterval(this.timer);
+    this.stopped = true; this.generation++; clearInterval(this.timer);
     window.removeEventListener("online", this.wake); window.removeEventListener("offline", this.wake); document.removeEventListener("visibilitychange", this.wake);
     if (this.channel) void this.client.removeChannel(this.channel);
+    this.channel = undefined;
   }
   private async reload() {
     if (this.stopped) return;
@@ -82,7 +96,7 @@ export class SyncEngine {
     }
   }
   sync(): Promise<void> {
-    if (this.stopped) return Promise.resolve();
+    if (this.stopped || this.sessionAccount !== this.userId) return Promise.resolve();
     if (this.syncPromise) { this.dirty = true; return this.syncPromise; }
     this.syncPromise = this.runSync().finally(() => { this.syncPromise = undefined; if (this.dirty && !this.stopped) { this.dirty = false; void this.sync(); } });
     return this.syncPromise;
@@ -91,16 +105,14 @@ export class SyncEngine {
     this.patch({ busy: true, online: navigator.onLine });
     try {
       if (!navigator.onLine) return;
-      const [result, account] = await Promise.all([
-        this.client.from("messages").select(this.loaded.size ? META_COLUMNS : COLUMNS).eq("user_id", this.userId).eq("deleted", false).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(PAGE_SIZE).overrideTypes<(Message | MessageMeta)[], { merge: false }>(),
-        this.client.from("app_accounts").select("user_id").eq("user_id", this.userId).maybeSingle(),
-      ]);
-      if (account.error || !account.data) throw new Error("Account unavailable. Showing cached items.");
+      // Message RLS already enforces account ownership and active status.
+      const result = await this.client.from("messages").select(this.loaded.size ? META_COLUMNS : COLUMNS).eq("user_id", this.userId).eq("deleted", false).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(PAGE_SIZE).overrideTypes<(Message | MessageMeta)[], { merge: false }>();
       if (result.error) throw new Error("Sync failed. Check your connection or Supabase project.");
       const recent = result.data as (Message | MessageMeta)[];
       if (!this.oldest && recent.length) this.oldest = recent.at(-1);
       if (!this.oldest) this.patch({ hasMore: false });
       await this.acceptHeaders(recent);
+      await this.reload();
       // Refresh loaded rows including tombstones and edits, not only the latest page.
       const recentIds = new Set(recent.map((m) => m.id));
       const ids = [...this.loaded].filter((id) => !recentIds.has(id));
@@ -109,15 +121,16 @@ export class SyncEngine {
         if (check.error) throw new Error("History update failed. Retry.");
         await this.acceptHeaders(check.data as MessageMeta[]);
       }
-      await this.flush();
       await this.reload();
       this.patch({ error: undefined, syncedAt: new Date().toISOString() });
+      // A slow queued write must not delay displaying incoming messages.
+      void this.flush();
       if (Date.now() >= this.archiveNext) void this.archive();
     } catch (error) { this.patch({ error: readableError(error) }); }
     finally { this.patch({ busy: false }); }
   }
   async loadMore() {
-    if (!this.oldest || this.state.busy) return;
+    if (!this.oldest || this.state.busy || this.sessionAccount !== this.userId) return;
     this.patch({ busy: true });
     try {
       const { created_at, id } = this.oldest;
@@ -131,7 +144,7 @@ export class SyncEngine {
     finally { this.patch({ busy: false }); }
   }
   async search(text: string, filter: "all" | "files" | "documents" | "pinned" = "all"): Promise<Message[]> {
-    if (!navigator.onLine) return (await this.db.messages.toArray()).filter((m) => !m.deleted && (filter !== "files" || m.attachments.length > 0) && (filter !== "documents" || m.kind === "document") && (filter !== "pinned" || m.pinned) && JSON.stringify([m.title, m.body, m.attachments]).toLowerCase().includes(text.toLowerCase())).slice(0, 100);
+    if (!navigator.onLine || this.sessionAccount !== this.userId) return (await this.db.messages.toArray()).filter((m) => !m.deleted && (filter !== "files" || m.attachments.length > 0) && (filter !== "documents" || m.kind === "document") && (filter !== "pinned" || m.pinned) && JSON.stringify([m.title, m.body, m.attachments]).toLowerCase().includes(text.toLowerCase())).slice(0, 100);
     let query = this.client.from("messages").select(COLUMNS).eq("deleted", false).ilike("search_text", `%${escapeLike(text.slice(0, 100))}%`);
     if (filter === "files") query = query.neq("attachments", "[]");
     if (filter === "documents") query = query.eq("kind", "document");
@@ -155,7 +168,7 @@ export class SyncEngine {
   flush(): Promise<void> {
     if (this.flushPromise) return this.flushPromise;
     const run = async () => {
-      while (!this.stopped && navigator.onLine) {
+      while (!this.stopped && this.sessionAccount === this.userId && navigator.onLine) {
         const item = (await this.db.pending.toArray()).find((p) => !p.blocked);
         if (!item) break;
         try {
@@ -171,11 +184,12 @@ export class SyncEngine {
       }
     };
     const locked = async () => { if (navigator.locks) await navigator.locks.request(`paseo-send:${this.userId}`, run); else await run(); };
-    this.flushPromise = locked().catch((error) => this.patch({ error: readableError(error) })).finally(() => { this.flushPromise = undefined; if (!this.stopped && navigator.onLine && this.archiveNext === 0) void this.archive(); });
+    this.flushPromise = locked().catch((error) => this.patch({ error: readableError(error) })).finally(() => { this.flushPromise = undefined; if (!this.stopped && this.sessionAccount === this.userId && navigator.onLine && this.archiveNext === 0) void this.archive(); });
     return this.flushPromise;
   }
   async pendingFor(messageId: string): Promise<PendingRecord | undefined> { return (await this.db.pending.toArray()).find((p) => p.mutation.id === messageId); }
   archive(): Promise<void> {
+    if (this.stopped || this.sessionAccount !== this.userId || !navigator.onLine) return Promise.resolve();
     if (this.archivePromise) return this.archivePromise;
     this.archiveNext = Date.now() + 30_000;
     this.archivePromise = api<{ completed: number; failed: number }>("/api/archive", {}, 310_000).then((result) => {

@@ -1,16 +1,43 @@
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { deploy, DeployError, providerApi } from "./deploy-core.mjs";
+
+export async function deploymentTokens({ env = process.env, userDirectory = homedir(), platform = process.platform, read = readFile, log = console.log } = {}) {
+  const result = {};
+  for (const [key, field] of [["SUPABASE_ACCESS_TOKEN", "supabaseToken"], ["VERCEL_TOKEN", "vercelToken"]]) {
+    if (env[key]?.trim()) result[field] = env[key].trim();
+    else if (env[`${key}_FILE`]) {
+      try { result[field] = (await read(env[`${key}_FILE`], "utf8")).trim(); }
+      catch { throw new DeployError(`Cannot read ${key}_FILE. Check the selected private file; do not print its contents.`); }
+      if (!result[field]) throw new DeployError(`${key}_FILE is empty.`);
+    }
+  }
+  if (!result.vercelToken) {
+    const dataDirectory = env.XDG_DATA_HOME || (platform === "win32" ? join(env.APPDATA || join(userDirectory, "AppData", "Roaming"), "xdg.data") : platform === "darwin" ? join(userDirectory, "Library", "Application Support") : join(userDirectory, ".local", "share"));
+    const paths = env.VERCEL_AUTH_FILE ? [env.VERCEL_AUTH_FILE] : [join(dataDirectory, "com.vercel.cli", "auth.json"), join(userDirectory, ".vercel", "auth.json")];
+    for (const path of paths) {
+      let token;
+      try { token = JSON.parse(await read(path, "utf8")).token; }
+      catch (error) {
+        if (error.code === "ENOENT" && !env.VERCEL_AUTH_FILE) continue;
+        throw new DeployError("Cannot read the selected Vercel CLI credentials. Use VERCEL_TOKEN or a private VERCEL_TOKEN_FILE; never dump the auth file.");
+      }
+      if (typeof token === "string" && token.trim()) { result.vercelToken = token.trim(); log("Using existing local Vercel CLI credentials (value hidden)."); break; }
+    }
+  }
+  return result;
+}
 
 export async function main(args = process.argv.slice(2)) {
   if (args.length === 1 && args[0] === "--help") {
     console.log("npm run deploy                              Interactive first-install wizard");
     console.log("npm run deploy -- --config PATH             Read-only plan for an agent");
     console.log("npm run deploy -- --config PATH --apply     Apply the approved plan");
-    console.log("Tokens: hidden terminal prompts, or SUPABASE_ACCESS_TOKEN and VERCEL_TOKEN.");
+    console.log("Tokens: existing Vercel CLI login, secret environment, private *_TOKEN_FILE paths, or hidden prompts. See docs/DEPLOY_AGENT.md#credential-access.");
     console.log("This tool supports a new dedicated Supabase database and a new Vercel project, or resuming its own saved installation. See docs/DEPLOY.md.");
     return;
   }
@@ -21,7 +48,7 @@ export async function main(args = process.argv.slice(2)) {
   const output = new Writable({ write(chunk, encoding, callback) { if (!muted) process.stdout.write(chunk, encoding); callback(); } });
   const terminal = process.stdin.isTTY ? createInterface({ input: process.stdin, output, terminal: true }) : null;
   async function ask(label, secret = false) {
-    if (!terminal) throw new DeployError("Provide tokens through the secret environment before using --config. Never put them in chat.");
+    if (!terminal) throw new DeployError("No credential input channel is available. Use an existing CLI login, secret environment, or private token-file paths. See docs/DEPLOY_AGENT.md#credential-access for chat-only environments.");
     if (secret) { process.stdout.write(label); muted = true; }
     try { return (await terminal.question(secret ? "" : label)).trim(); }
     finally { if (secret) { muted = false; process.stdout.write("\n"); } }
@@ -35,8 +62,7 @@ export async function main(args = process.argv.slice(2)) {
   }
   try {
     console.log("GropBox setup — no SQL or application API keys to copy.");
-    let supabaseToken = process.env.SUPABASE_ACCESS_TOKEN;
-    let vercelToken = process.env.VERCEL_TOKEN;
+    let { supabaseToken, vercelToken } = await deploymentTokens();
     if (!supabaseToken) { console.log("Supabase deployment access: https://supabase.com/dashboard/account/tokens (not a database password or project API key)"); supabaseToken = await ask("Supabase access token (hidden): ", true); }
     if (!vercelToken) { console.log("Vercel deployment access: https://vercel.com/account/settings/tokens (scope it to your chosen team)"); vercelToken = await ask("Vercel access token (hidden): ", true); }
     let config;
@@ -68,6 +94,7 @@ export async function main(args = process.argv.slice(2)) {
       console.log(`Vercel: ${plan.vercel.team} / ${plan.vercel.project}`);
       console.log(`${plan.initializeDatabase ? "Initialize the empty database; " : "Keep existing data; "}${plan.createVercelProject ? "create" : "reuse"} the Vercel project, configure Google sign-in, and deploy.`);
       console.log("Uses your existing provider plans and quotas. No plan upgrades, domains, or other projects will be changed; provider usage can incur charges under your plan.");
+      console.log("Read-only checks are not an API dry-run: write permissions, build success, and live OAuth are verified only during apply and sign-in.");
       if (configMode) return args.includes("--apply");
       return (await ask("Apply to these targets? [y/N]: ")).toLowerCase() === "y";
     } });

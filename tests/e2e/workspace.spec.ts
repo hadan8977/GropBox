@@ -1,13 +1,15 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Message, Mutation, Attachment } from "../../src/lib/model";
 
 // All provider traffic is mocked here. These tests verify UI integration, not deployed OAuth/Drive.
 const userId = "11111111-1111-4111-8111-111111111111";
 const user = { id: userId, aud: "authenticated", role: "authenticated", email: "demo@example.com", app_metadata: { provider: "google" }, user_metadata: { name: "Alex" }, created_at: "2026-09-15T00:00:00Z" };
-function sessionCookie() {
-  const token = [ { alg: "HS256", typ: "JWT" }, { sub: userId, aud: "authenticated", role: "authenticated", exp: Math.floor(Date.now() / 1000) + 3600 } ].map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".") + "." + Buffer.from("test-signature").toString("base64url");
-  return `base64-${Buffer.from(JSON.stringify({ access_token: token, refresh_token: "test-session-refresh", token_type: "bearer", expires_at: Math.floor(Date.now() / 1000) + 3600, expires_in: 3600, user })).toString("base64url")}`;
+function sessionCookie(lifetime = 3600) {
+  const token = [ { alg: "HS256", typ: "JWT" }, { sub: userId, aud: "authenticated", role: "authenticated", exp: Math.floor(Date.now() / 1000) + lifetime } ].map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".") + "." + Buffer.from("test-signature").toString("base64url");
+  return `base64-${Buffer.from(JSON.stringify({ access_token: token, refresh_token: "test-session-refresh", token_type: "bearer", expires_at: Math.floor(Date.now() / 1000) + lifetime, expires_in: 3600, user })).toString("base64url")}`;
 }
 async function connect(context: BrowserContext, rows: Message[], conflict = false) {
   await context.addCookies([{ name: "sb-gropbox-test-auth-token", value: sessionCookie(), domain: "localhost", path: "/", sameSite: "Lax" }]);
@@ -84,6 +86,79 @@ test("queues offline text and sends after reconnection", async ({ page, context 
   await page.getByRole("textbox", { name: "Message" }).fill("Keep this while offline."); await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByRole("status", { name: "Pending" })).toBeVisible(); expect(rows).toHaveLength(0);
   await context.setOffline(false); await expect(page.getByRole("status", { name: "Sent", exact: true }).first()).toBeVisible({ timeout: 10_000 }); expect(rows).toHaveLength(1);
+});
+
+test("shows cached history before a stalled session refresh, then clears it on sign-out", async ({ page, context }) => {
+  await connect(context, history(1)); await open(page);
+  await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible();
+  let release!: () => void, requested = false;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await context.route("https://gropbox-test.supabase.co/auth/v1/token**", async route => {
+    requested = true; await pending;
+    await route.fulfill({ json: JSON.parse(Buffer.from(sessionCookie().slice(7), "base64url").toString()) });
+  });
+  await context.addCookies([{ name: "sb-gropbox-test-auth-token", value: sessionCookie(-60), domain: "localhost", path: "/", sameSite: "Lax" }]);
+  try {
+    await page.reload();
+    await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible({ timeout: 2000 });
+    await expect.poll(() => requested).toBe(true);
+    await expect(page.getByRole("textbox", { name: "Message" })).toBeEditable();
+  } finally { release(); }
+  await expect.poll(async () => JSON.parse(Buffer.from((await context.cookies()).find(c => c.name === "sb-gropbox-test-auth-token")!.value.slice(7), "base64url").toString()).expires_at).toBeGreaterThan(Math.floor(Date.now() / 1000));
+  await context.clearCookies(); await page.reload();
+  await expect(page.getByRole("button", { name: "Continue with Google" })).toBeVisible();
+  await expect(page.getByText("Saved message 1", { exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('gropbox:account:https://gropbox-test.supabase.co'))).toBeNull();
+});
+
+test("incoming messages do not wait for a stalled outgoing write", async ({ page, context }) => {
+  const rows = history(1); await connect(context, rows); await open(page);
+  await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible();
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await context.route("**/api/messages", async route => { await pending; await route.fallback(); });
+  try {
+    await page.getByRole("textbox", { name: "Message" }).fill("Slow outgoing message");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    rows.push({ ...rows[0], id: "55555555-5555-4555-8555-555555555554", body: "Incoming now", created_at: "2026-09-16T08:00:00Z" });
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(page.getByText("Incoming now", { exact: true })).toBeVisible({ timeout: 2000 });
+    await expect(page.getByRole("status", { name: "Pending", exact: true })).toBeVisible();
+  } finally { release(); }
+  await expect(page.getByRole("status", { name: "Sent", exact: true }).last()).toBeVisible();
+});
+
+test("cached app and history reopen offline without caching private responses", async ({ page, context }) => {
+  await connect(context, history(1)); await open(page);
+  await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(async () => Boolean(navigator.serviceWorker.controller && await (await caches.open('gropbox-shell-v3')).match('/'))), { timeout: 15000 }).toBe(true);
+  const cache = await page.evaluate(async () => {
+    const store = await caches.open('gropbox-shell-v3');
+    return { html: await (await store.match('/'))!.text(), paths: (await store.keys()).map(request => new URL(request.url).pathname) };
+  });
+  expect(cache.html).not.toMatch(/demo@example.com|test-session-refresh|test-server-only-key/);
+  expect(cache.paths.every(path => path === '/' || path === '/offline.html' || path === '/icon.svg' || path.startsWith('/_next/static/'))).toBe(true);
+  await context.setOffline(true);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible({ timeout: 3000 });
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeEditable();
+  await expect(page.getByRole("heading", { name: "Offline", exact: true })).toHaveCount(0);
+});
+
+test("folder drops upload nested file contents instead of a directory placeholder", async ({ page, context }, info) => {
+  const rows: Message[] = []; await connect(context, rows); await open(page);
+  const folder = info.outputPath("Folder");
+  await mkdir(join(folder, "Nested"), { recursive: true });
+  await writeFile(join(folder, "Nested", "inside.txt"), "inside");
+  const session = await context.newCDPSession(page);
+  const area = (await page.locator(".timeline").boundingBox())!;
+  for (const type of ["dragEnter", "dragOver", "drop"] as const) await session.send("Input.dispatchDragEvent", { type, x: area.x + 60, y: area.y + 60, data: { items: [], files: [folder], dragOperationsMask: 1 } });
+  await expect(page.getByText("inside.txt", { exact: true })).toBeVisible();
+  await expect(page.locator(".upload-list").getByText("Ready", { exact: false })).toBeVisible();
+  await expect(page.locator(".upload-list").getByText("Folder", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("status", { name: "Sent", exact: true })).toBeVisible();
+  expect(rows[0].attachments).toEqual([{ id: "test-file-id", name: "inside.txt", size: 6, mimeType: "text/plain" }]);
 });
 test("preserves failed content and accepts a small file upload", async ({ page, context }) => {
   const rows: Message[] = []; await connect(context, rows, true); await open(page);
@@ -176,6 +251,9 @@ test("minimal English library and settings", async ({ page, context }, info) => 
   const first = (await bubbles.nth(0).boundingBox())!, next = (await bubbles.nth(1).boundingBox())!;
   expect(next.y - first.y - first.height).toBeCloseTo(4, 0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const shell = (await page.locator(".app-shell").boundingBox())!;
+  expect(shell).toEqual({ x: 0, y: 0, ...page.viewportSize()! });
+  await expect(page.locator(".app-shell")).toHaveCSS("border-radius", "0px");
   await page.screenshot({ path: info.outputPath("gropbox.png"), fullPage: true });
   await page.getByRole("button", { name: "Settings", exact: true }).filter({ visible: true }).click();
   await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
@@ -252,7 +330,7 @@ test("glass adapts to dark mode and reduced effects", async ({ page, context }, 
   await connect(context, history(3)); await open(page);
   await expect(page.getByText("Saved message 3", { exact: true })).toBeVisible();
   await expect(page.getByText("Saved message 3", { exact: true })).toBeInViewport();
-  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgba(26, 33, 49, 0.92)");
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(25, 30, 40)");
   await expect(page.locator(".composer")).toHaveCSS("transition-duration", "0s");
   await page.screenshot({ path: info.outputPath("dark.png"), fullPage: true });
   const session = await context.newCDPSession(page);

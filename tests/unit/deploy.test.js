@@ -6,7 +6,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deploy, deploymentFiles, googleClient, providerApi, migrationQuery } from "../../scripts/deploy-core.mjs";
-import { main } from "../../scripts/deploy.mjs";
+import { main, deploymentTokens } from "../../scripts/deploy.mjs";
 
 const terminal = vi.hoisted(() => ({ answers: [], question: vi.fn(), close: vi.fn() }));
 vi.mock("node:readline/promises", () => ({ createInterface: () => ({ question: label => { terminal.question(label); return Promise.resolve(terminal.answers.shift() ?? ""); }, close: terminal.close }) }));
@@ -71,10 +71,17 @@ async function scenario({ delayedDomain = false, failFinal = false, occupied = f
       if (url.pathname === `/v2/teams/${teamId}`) return json({ id: teamId, name: "Personal" });
       if (url.pathname === "/v9/projects/gropbox-test") return cloud.project ? json(cloud.project) : Response.json({}, { status: 404 });
       if (url.pathname === "/v11/projects") {
+        expect(Object.keys(body).sort()).toEqual(["buildCommand", "environmentVariables", "framework", "installCommand", "name"]);
+        if (cloud.rejectProject) return Response.json({ error: { message: "private details" } }, { status: 400 });
         expect(cloud.project).toBeNull();
         cloud.project = { id: projectId, accountId: teamId };
         cloud.env = Object.fromEntries(body.environmentVariables.map(e => [e.key, e.value]));
         return json(cloud.project);
+      }
+      if (url.pathname === `/v9/projects/${projectId}` && options.method === "PATCH") {
+        expect(body).toEqual({ nodeVersion: "24.x" });
+        if (cloud.rejectSettings) return Response.json({ error: { message: "private details" } }, { status: 400 });
+        return json({ ...cloud.project, ...body });
       }
       if (url.pathname.endsWith("/domains")) return json({ domains: cloud.delayedDomain && !cloud.deployments.length ? [] : [{ name: "gropbox-real-name.vercel.app", verified: true, gitBranch: null, redirect: null }] });
       if (url.pathname.endsWith("/env")) {
@@ -141,6 +148,16 @@ describe("deployment walkthrough with mocked providers and real local PostgreSQL
     expect((await deploy(s.config, { ...s.options, confirm: async () => false })).status).toBe("planned");
     expect(s.cloud.writes).toEqual([]);
     await expect(stat(join(s.root, ".gropbox"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["rejectProject", "rejectSettings"])("leaves SQL untouched when Vercel %s fails, then safely resumes", async failure => {
+    const s = await scenario(); s.cloud[failure] = true;
+    await expect(deploy(s.config, s.options)).rejects.toThrow("HTTP 400");
+    expect(s.cloud.migrationCount).toBe(0);
+    expect((await s.db.query("select to_regclass('public.messages') as name")).rows[0].name).toBeNull();
+    s.cloud[failure] = false;
+    await deploy(s.config, s.options);
+    expect(s.cloud.migrationCount).toBe(1);
   });
 
   it("does not overwrite state saved by another setup after preflight", async () => {
@@ -223,6 +240,21 @@ describe("deployment walkthrough with mocked providers and real local PostgreSQL
 });
 
 describe("deployment input boundaries", () => {
+  it("prefers supplied tokens and reads only the known Vercel CLI store when needed", async () => {
+    const read = vi.fn(async () => JSON.stringify({ token: tokens.vercelToken, unrelated: "must not be logged" }));
+    const log = vi.fn();
+    expect(await deploymentTokens({ env: { SUPABASE_ACCESS_TOKEN: tokens.supabaseToken, VERCEL_TOKEN: tokens.vercelToken }, read, log })).toEqual(tokens);
+    expect(read).not.toHaveBeenCalled();
+    expect(await deploymentTokens({ env: { SUPABASE_ACCESS_TOKEN: tokens.supabaseToken }, userDirectory: "/test-user", platform: "linux", read, log })).toEqual(tokens);
+    expect(read).toHaveBeenCalledExactlyOnceWith(join("/test-user", ".local", "share", "com.vercel.cli", "auth.json"), "utf8");
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/vercel_private_test_token|must not be logged/);
+  });
+  it("supports explicit private token files without scanning unrelated configuration", async () => {
+    const read = vi.fn(async path => path === "supabase-private" ? tokens.supabaseToken : tokens.vercelToken);
+    expect(await deploymentTokens({ env: { SUPABASE_ACCESS_TOKEN_FILE: "supabase-private", VERCEL_TOKEN_FILE: "vercel-private" }, read })).toEqual(tokens);
+    expect(read.mock.calls).toEqual([["supabase-private", "utf8"], ["vercel-private", "utf8"]]);
+    await expect(deploymentTokens({ env: { VERCEL_AUTH_FILE: "specified-auth" }, read: async () => { throw new Error("sensitive details"); } })).rejects.toThrow("Cannot read the selected Vercel CLI credentials");
+  });
   it("rejects a foreign callback and never follows JSON-provided URLs", () => {
     expect(() => googleClient({ web: { ...google.web, redirect_uris: ["https://elsewhere.example/callback"] } }, ref)).toThrow("callback");
     expect(googleClient({ web: { ...google.web, token_uri: "https://attacker.example" } }, ref)).toEqual({ GOOGLE_CLIENT_ID: google.web.client_id, GOOGLE_CLIENT_SECRET: google.web.client_secret });

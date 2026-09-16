@@ -27,8 +27,8 @@ Use the actual callback shown in your dashboard, not the placeholder above. **Re
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/). Use the project selector to create a dedicated project or select the approved existing one. Check this selection before each following action.
 2. Open the [Google Drive API page](https://console.cloud.google.com/apis/library/drive.googleapis.com) for that project and select **Enable**. If already enabled, leave it enabled.
-3. Open [Google Auth Platform](https://console.cloud.google.com/auth/overview). If prompted, select **Get started**. Under **Branding**, enter an app name such as `GropBox`, your support email, and developer contact email. Under **Audience**, personal Gmail accounts need **External**; **Internal** is only for a qualifying Workspace organization. For an External app in **Testing**, add the Google email you will use under **Test users**.
-4. Under **Data Access → Add or remove scopes**, select or manually add the scopes below, then save. `drive.file` limits access to files the app creates or the user explicitly grants; do not replace it with full-Drive access. [Drive scope reference](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
+3. Open [Google Auth Platform](https://console.cloud.google.com/auth/overview) and complete registration if prompted. In [Branding](https://console.cloud.google.com/auth/branding), enter an app name such as `GropBox`, support email, and developer contact email. In [Audience](https://console.cloud.google.com/auth/audience), personal Gmail accounts need **External**; **Internal** is only for a qualifying Workspace organization. In **Testing**, add your email to the test users. Labels vary by language: use these direct pages and check the project selector.
+4. In [Data Access](https://console.cloud.google.com/auth/scopes), select or manually add the scopes below, then save. `drive.file` limits access to files the app creates or the user explicitly grants; do not replace it with full-Drive access. [Drive scope reference](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
 
    ```text
    openid
@@ -37,8 +37,8 @@ Use the actual callback shown in your dashboard, not the placeholder above. **Re
    https://www.googleapis.com/auth/drive.file
    ```
 
-5. Under **Clients → Create client**, select **Web application** and name it `GropBox Web`. In **Authorized redirect URIs**, paste the exact Supabase callback from step A. This is **not** the future Vercel URL. GropBox uses server-side OAuth redirects, not Google's JavaScript sign-in widget, so **Authorized JavaScript origins** can be left empty; do not invent a domain to fill it. [Web-server OAuth setup](https://developers.google.com/identity/protocols/oauth2/web-server#creatingcred)
-6. Select **Create** and save the **Client ID** and **Client secret** privately. Keep the secret when it is shown; do not commit any downloaded credentials file.
+5. In [Clients](https://console.cloud.google.com/auth/clients), create a **Web application** named `GropBox Web`. Paste the exact Supabase callback from step A into **Authorized redirect URIs**, not the future Vercel URL. Leave JavaScript origins empty for this server-side flow. [Current client setup](https://support.google.com/cloud/answer/15549257?hl=en)
+6. Save the client ID, secret, and downloaded JSON privately **at creation time**: the secret may not be downloadable later. Do not commit credentials or rotate an existing live secret just to download another copy.
 
 **Ready to connect:** Drive API is enabled, your intended account is allowed by the audience settings, and a Web OAuth client exists with the Supabase callback.
 

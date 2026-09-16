@@ -11,6 +11,16 @@ afterEach(async () => { await db.delete(); vi.unstubAllGlobals(); });
 const mutation = (): Mutation => ({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", body: "Offline draft", title: "", pinned: false, deleted: false, attachments: [] });
 
 describe("local outbox transaction", () => {
+  it.each([null, "another-account"])("does not send a cached outbox for an unconfirmed or different session: %s", async account => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const request = vi.fn(); vi.stubGlobal("fetch", request);
+    const engine = new SyncEngine(db, {} as SupabaseClient, "user");
+    engine.setSessionAccount(account);
+    const m = mutation();
+    await engine.enqueue(m); await engine.flush(); await engine.sync(); await engine.archive();
+    expect(request).not.toHaveBeenCalled();
+    expect((await db.pending.get(m.operationId))?.mutation).toEqual(m);
+  });
   it("consumes a draft only in the same transaction as durable enqueue", async () => {
     const m = mutation(); await db.drafts.put({ id: "composer", body: m.body, attachments: [] });
     const engine = new SyncEngine(db, {} as SupabaseClient, "user");

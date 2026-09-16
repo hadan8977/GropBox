@@ -16,13 +16,15 @@ Windows PowerShell and Linux are supported by the same script. No `npm install`,
 
 ## 2. Authorize and choose projects
 
-The wizard asks for:
+The wizard reuses supplied environment credentials or an existing local Vercel CLI login, then asks only for missing access:
 
 - **Supabase deployment access:** create a short-lived [personal access token](https://supabase.com/dashboard/account/tokens) and paste it into the hidden prompt. If you have no empty project, create one in the [dashboard](https://supabase.com/dashboard) first, choosing its region and plan. Leave its tables and Google provider untouched. The database password stays in your password manager; **it is not an API key**.
-- **Vercel deployment access:** create a short-lived [Vercel token](https://vercel.com/account/settings/tokens) scoped to the intended team and paste it into the hidden prompt.
+- **Vercel deployment access:** if no usable CLI login exists, create a short-lived [Vercel token](https://vercel.com/account/settings/tokens) scoped to the intended team and paste it into the hidden prompt.
 - Select the Supabase project and Vercel team from the lists, choose an unused Vercel project name, and enter your Google email.
 
 These are management permissions, not application API keys. Tokens stay in this process; they are not saved or sent to the other provider. Review your provider plans: the tool never upgrades them, but usage may still incur charges under an existing paid plan.
+
+Using only an agent chat, without a terminal? See [credential access](DEPLOY_AGENT.md#credential-access). Do not assume a secret-input feature exists or set up a Drive token handoff.
 
 <details>
 <summary>Token permissions / HTTP 403</summary>
@@ -37,18 +39,20 @@ An expired, read-only, or incorrectly scoped token stops setup. Do not solve a p
 
 The wizard displays your exact Google callback. Complete the [one-time Google setup below](#google-setup), download the Web client's JSON, and give the wizard its **local file path**, not its contents. Confirm the named deployment targets when prompted.
 
-The tool initializes the empty database, checks RLS/Realtime, retrieves application keys, creates separate encryption/cron secrets, sets the Google provider and exact redirect URLs, and deploys. It uses Vercel's assigned production domain; if necessary, a setup-only build obtains the domain before the final build. You do not copy the domain between dashboards.
+The tool retrieves application keys, generates separate encryption/cron secrets, creates/configures Vercel, then initializes the database and checks RLS/Realtime. It sets Google Auth and redirect URLs and deploys using Vercel's assigned production domain. If necessary, a setup-only build obtains the domain before the final build. You do not copy domains between dashboards.
+
+The read-only plan checks selected resources, not future write acceptance or build success. Vercel configuration failures now happen before SQL; later failures may still leave the approved project or database initialized. Resume using the saved state rather than deleting resources.
 
 Open the returned URL and sign in with Google. Send a small file and a message, then open the same URL on a second device. The app creates its own `GropBox` Drive folder. These real checks are still necessary: a successful build is not proof of Google consent, Drive access, or cross-device sync.
 
 ## Google setup
 
-This is the remaining one-time dashboard work, not something a normal Google sign-in can replace:
+Use these direct **Google Auth Platform** links and check the project selector on each page. Dashboard labels vary by language. Complete initial app registration if prompted, then return to the linked page. See Google's [current consent guide](https://developers.google.com/workspace/guides/configure-oauth-consent) and [client guide](https://support.google.com/cloud/answer/15549257?hl=en).
 
 1. In [Google Cloud](https://console.cloud.google.com/), create/select your project and [enable the Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com).
-2. Open [Google Auth Platform](https://console.cloud.google.com/auth/overview). Set the app name and contact emails. For a personal Gmail account, choose **External**; while in **Testing**, add your email under **Audience → Test users**.
-3. Under **Data Access**, add `openid`, `https://www.googleapis.com/auth/userinfo.email`, `https://www.googleapis.com/auth/userinfo.profile`, and `https://www.googleapis.com/auth/drive.file`. Do not request full-Drive access.
-4. Under **Clients → Create client**, choose **Web application**. Paste the wizard's URL into **Authorized redirect URIs**, then create the client and download its JSON. JavaScript origins can be left empty for this server-side OAuth flow. Save the JSON outside the repository and return to the wizard. If you change a callback later, download the updated JSON again. [Google OAuth client setup](https://developers.google.com/identity/protocols/oauth2/web-server#creatingcred)
+2. In [Branding](https://console.cloud.google.com/auth/branding), set the app name and contact emails. In [Audience](https://console.cloud.google.com/auth/audience), personal Gmail accounts use **External**; while in **Testing**, add your email to the test users.
+3. In [Data Access](https://console.cloud.google.com/auth/scopes), add `openid`, `https://www.googleapis.com/auth/userinfo.email`, `https://www.googleapis.com/auth/userinfo.profile`, and `https://www.googleapis.com/auth/drive.file`. Do not request full-Drive access.
+4. In [Clients](https://console.cloud.google.com/auth/clients), create a **Web application**, paste the wizard's callback into **Authorized redirect URIs**, and leave JavaScript origins empty. Download the JSON **at creation time** and save it privately outside the repository: the secret may not be downloadable later. For an existing client, retain its secret; after changing a callback in Google, update only `web.redirect_uris` in the private JSON to match. Do not rotate a live secret just to download credentials again.
 
 For long-lived use, review Google's publishing requirements: an External app in Testing with Drive scopes receives refresh tokens that expire after seven days. Production status does not guarantee permanent access. [Token expiration](https://developers.google.com/identity/protocols/oauth2#expiration)
 

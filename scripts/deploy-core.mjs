@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 export class DeployError extends Error {}
 const requireValue = (ok, message) => { if (!ok) throw new DeployError(message); };
-const buildSettings = { framework: "nextjs", nodeVersion: "24.x", installCommand: "npm ci", buildCommand: "npm run build" };
+const buildSettings = { framework: "nextjs", installCommand: "npm ci", buildCommand: "npm run build" };
+const deploymentSettings = { ...buildSettings, nodeVersion: "24.x" };
 const sqlPath = "supabase/migrations/001_gropbox.sql";
 
 export function validateConfig(config) {
@@ -19,7 +20,7 @@ export function validateConfig(config) {
 export function googleClient(json, ref) {
   const client = json?.web;
   requireValue(client && typeof client.client_id === "string" && client.client_id.endsWith(".apps.googleusercontent.com") && typeof client.client_secret === "string" && client.client_secret.length > 0, "Import a Google Web application client JSON, not a service-account or desktop-client file.");
-  requireValue(client.redirect_uris?.includes(`https://${ref}.supabase.co/auth/v1/callback`), "The Google client JSON must include this Supabase project's callback. Save the callback in Google, then download the JSON again.");
+  requireValue(client.redirect_uris?.includes(`https://${ref}.supabase.co/auth/v1/callback`), "The Google client JSON must include this Supabase project's callback. Save it in Google, then update web.redirect_uris in your private JSON to match without changing its secret.");
   return { GOOGLE_CLIENT_ID: client.client_id, GOOGLE_CLIENT_SECRET: client.client_secret };
 }
 
@@ -153,7 +154,7 @@ export async function deploy(input, { root = process.cwd(), supabaseToken, verce
     throw new DeployError("Vercel is still building or assigning its domain. Rerun later; the pending deployment ID is saved.");
   }
   async function startDeployment(kind) {
-    const result = await api("vercel", "/v13/deployments", { method: "POST", body: { name: config.projectName, project: state.projectId, target: "production", projectSettings: buildSettings, files } });
+    const result = await api("vercel", "/v13/deployments", { method: "POST", body: { name: config.projectName, project: state.projectId, target: "production", projectSettings: deploymentSettings, files } });
     requireValue(typeof result.id === "string", "Vercel did not return a deployment ID. Inspect the project before retrying.");
     state.pending = { id: result.id, kind, sourceHash };
     await save();
@@ -172,6 +173,15 @@ export async function deploy(input, { root = process.cwd(), supabaseToken, verce
       state = { version: 1, installId: randomUUID(), config, schemaHash, env: { NEXT_PUBLIC_SUPABASE_URL: `https://${config.supabaseRef}.supabase.co`, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: publicKey, SUPABASE_SECRET_KEY: secretKey, ...client, TOKEN_ENCRYPTION_KEY: randomBytes(32).toString("hex"), CRON_SECRET: randomBytes(32).toString("hex"), ALLOWED_GOOGLE_EMAILS: config.email } };
       await save();
     }
+    if (!state.projectId) {
+      log("Creating the approved Vercel project...");
+      const project = await api("vercel", "/v11/projects", { method: "POST", body: { name: config.projectName, ...buildSettings, environmentVariables: environment() } });
+      requireValue(typeof project.id === "string" && project.accountId === config.vercelTeamId, "Unexpected Vercel project response. Inspect the selected team before retrying.");
+      state.projectId = project.id; await save();
+    }
+    // Creation and update have different schemas. Configure the approved project
+    // before touching SQL; a rejected Vercel configuration must leave the DB empty.
+    await api("vercel", `/v9/projects/${state.projectId}`, { method: "PATCH", body: { nodeVersion: deploymentSettings.nodeVersion } });
     if (!ours) {
       log("Initializing the empty database...");
       await query(migrationQuery(sql, `gropbox:${state.installId}:${schemaHash}`), false);
@@ -179,12 +189,6 @@ export async function deploy(input, { root = process.cwd(), supabaseToken, verce
       requireValue(installed?.marker === `gropbox:${state.installId}:${schemaHash}` && installed.rls_tables === 6 && installed.realtime === true, "Database initialization did not pass its RLS/Realtime checks. Do not rerun SQL manually; inspect the selected project.");
     }
     state.initialized = true; await save();
-    if (!state.projectId) {
-      log("Creating the approved Vercel project...");
-      const project = await api("vercel", "/v11/projects", { method: "POST", body: { name: config.projectName, ...buildSettings, environmentVariables: environment() } });
-      requireValue(typeof project.id === "string" && project.accountId === config.vercelTeamId, "Unexpected Vercel project response. Inspect the selected team before retrying.");
-      state.projectId = project.id; await save();
-    }
     if (state.pending) {
       const pending = state.pending;
       const result = await api("vercel", `/v13/deployments/${encodeURIComponent(pending.id)}`);

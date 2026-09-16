@@ -19,7 +19,7 @@ Files live under `GropBox/Files/YYYY-MM`; versioned message and note archives us
 
 - One self-chat timeline with plain text, notes, files, search, pinning, edits, and logical deletion.
 - Consecutive bubbles have a 4 px gap. A five-minute gap or local date change starts a time group. New-message counts are session-local, not persistent cross-device read receipts.
-- Cache-first rendering and a virtual list keep recent history accessible without scanning Drive.
+- The anonymous shell is prerendered and cached with its boot assets. Account-scoped IndexedDB history renders before a slow session refresh; a display-only account hint never authorizes network operations. Incoming messages do not wait for queued writes. No Drive scan is needed.
 - Realtime signals trigger an authenticated re-query. Reconnection, foregrounding, and periodic checks reconcile missed changes; polling falls back to approximately four seconds in the foreground.
 - Latest pages use 30 records. Cursor pagination uses server timestamps and IDs; repeat syncs compare versions before fetching changed bodies.
 - Writes enter a durable local outbox. Only database acknowledgement means sent; only archive completion means archived.
@@ -29,6 +29,8 @@ Files live under `GropBox/Files/YYYY-MM`; versioned message and note archives us
 ## Files and archives
 
 Uploads go directly from browser to Drive in 8 MiB chunks, with up to two concurrent uploads and 30 queued files. A file becomes visible on other devices after upload completion and Send. Upload progress is not a delivery receipt.
+
+Folder drops recursively collect files, including nested directories, into the existing monthly Drive folder. Source directory hierarchy and empty folders are not recreated. Unreadable or over-limit folders are rejected before starting a partial upload.
 
 Reopening a paused upload may require selecting the original file again. Background tabs and locked phones may suspend work. File downloads use streaming where supported, otherwise bounded buffers or the Drive page.
 
@@ -50,7 +52,7 @@ Free services have quotas and may pause after inactivity; consult [Supabase pric
 
 Google consent is required initially. Sessions can renew, but revoked grants, policy changes, or expired refresh tokens require reconnection. [External OAuth apps in Testing can issue seven-day refresh tokens](https://developers.google.com/identity/protocols/oauth2#expiration) when Drive access is requested.
 
-The current offline cold-start page requires reconnection to reopen the full app. PWA share-target input accepts text and links, not arbitrary shared files. There is no local-network device discovery, Office editor, collaborative editing, or background-upload guarantee.
+After an online visit caches the production shell/assets and account history, they can reopen offline. First visits, cleared/evicted storage, and uncached previews still need the network. The fallback distinguishes an offline device from an unreachable app; it does not claim drafts were saved without loading them. PWA share-target input accepts text and links, not arbitrary shared files. There is no local-network device discovery, Office editor, collaborative editing, or background-upload guarantee.
 
 ```sh
 npm test
@@ -59,7 +61,7 @@ npm run build
 
 The build includes TypeScript checks. Unit tests include a local PostgreSQL-compatible PGlite migration/RLS test; they do not prove a deployed Supabase instance is configured.
 
-`npm run test:e2e` starts its own server on port 3100. With an existing Chrome installation, set `PLAYWRIGHT_CHANNEL=chrome` (PowerShell: `$env:PLAYWRIGHT_CHANNEL='chrome'`). Otherwise install the project's Playwright Chromium browser first. Provider traffic is mocked only in tests; mobile viewport emulation is not an iOS Safari device test.
+`npm run test:e2e` builds with test-only provider settings and starts a production server on port 3100, testing caching without development HMR traffic. It includes build/TypeScript validation; a separate build for the same changes is unnecessary. With an existing Chrome installation, set `PLAYWRIGHT_CHANNEL=chrome` (PowerShell: `$env:PLAYWRIGHT_CHANNEL='chrome'`). Otherwise install the project's Playwright Chromium browser first. Provider traffic is mocked only in tests; mobile viewport emulation is not an iOS Safari device test.
 
 Real Google sign-in, deployed RLS/Realtime, company-network access, phone behavior, and multi-gigabyte transfers require real accounts and devices. Do not claim measured latency or real 5 GB upload success from local mocks.
 

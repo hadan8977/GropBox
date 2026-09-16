@@ -1,12 +1,11 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
-import type { User } from "@supabase/supabase-js";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { ArrowUp, ArrowDown, FilePlus2, FileText, FolderOpen, Inbox, LoaderCircle, Paperclip, Pin, RefreshCw, Search, UploadCloud, WifiOff, X, Pause, Play, Settings2 } from "lucide-react";
 import { browserClient } from "@/lib/supabase/browser";
-import { DriveCache } from "@/lib/cache";
+import { DriveCache, loadAccountHint, saveAccountHint, ACCOUNT_HINT_KEY, type AccountHint } from "@/lib/cache";
 import { SyncEngine } from "@/lib/sync";
-import { UploadManager } from "@/lib/uploads";
+import { UploadManager, filesFromDrop } from "@/lib/uploads";
 import { api, readableError } from "@/lib/api";
 import { formatBytes, plainText, type Message, type Mutation, type VisibleMessage } from "@/lib/model";
 import { Editor } from "./editor";
@@ -34,7 +33,7 @@ const timelineComponents = { Header: HistoryHeader };
 
 export function App({ configured }: { configured: boolean }) {
   useEffect(() => {
-    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => { console.warn("Offline fallback unavailable."); });
+    if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => { console.warn("Offline fallback unavailable."); });
   }, []);
   return configured ? <AuthGate /> : <Welcome configured={false} />;
 }
@@ -46,6 +45,7 @@ function Welcome({ configured, error }: { configured: boolean; error?: string })
     account: "This account isn't allowed.",
     database: "Database setup required.",
     consent: "Reconnect Google to allow Drive access.",
+    unavailable: "Can't reach sign-in. Try again.",
   };
   return <main className="welcome">
     <section className="login-panel">
@@ -62,20 +62,35 @@ function Welcome({ configured, error }: { configured: boolean; error?: string })
 }
 function AuthGate() {
   const [client] = useState(browserClient);
-  const [user, setUser] = useState<User | null>(), [error, setError] = useState<string>();
+  const [user, setUser] = useState<AccountHint | null>(), [error, setError] = useState<string>();
+  const [sessionAccount, setSessionAccount] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
   useEffect(() => {
     let disposed = false;
-    const { data } = client.auth.onAuthStateChange((_event, session) => { if (!disposed) setUser(session?.user ?? null); });
-    void client.auth.getSession().then(({ data, error }) => { if (disposed) return; if (error) setError("login"); setUser(data.session?.user ?? null); }).catch(() => { if (!disposed) { setError("login"); setUser(null); } });
+    const cached = loadAccountHint();
+    if (cached) setUser(cached);
+    const failed = () => { if (!disposed) { setUnavailable(true); setError("unavailable"); setUser(current => current === undefined ? null : current); } };
+    const timeout = setTimeout(failed, 8000);
+    const accept = (account: AccountHint | null) => {
+      if (disposed) return;
+      clearTimeout(timeout); saveAccountHint(account); setSessionAccount(account?.id ?? null); setUser(account); setUnavailable(false);
+    };
+    const { data } = client.auth.onAuthStateChange((event, session) => {
+      if (session?.user) accept(session.user);
+      else if (event === "SIGNED_OUT") accept(null);
+    });
+    void client.auth.getSession().then(({ data, error }) => { if (error) failed(); else accept(data.session?.user ?? null); }).catch(failed);
+    const changed = (event: StorageEvent) => { if (event.key === ACCOUNT_HINT_KEY && !event.newValue && !disposed) setUser(null); };
+    window.addEventListener("storage", changed);
     setError(new URLSearchParams(window.location.search).get("auth_error") ?? undefined);
-    return () => { disposed = true; data.subscription.unsubscribe(); };
+    return () => { disposed = true; clearTimeout(timeout); data.subscription.unsubscribe(); window.removeEventListener("storage", changed); };
   }, [client]);
   if (user === undefined) return <div className="loading-page"><Brand /><LoaderCircle className="spin" /><p>Loading…</p></div>;
   if (!user) return <Welcome configured error={error} />;
-  return <Workspace key={user.id} user={user} />;
+  return <Workspace key={user.id} user={user} sessionAccount={sessionAccount} authUnavailable={unavailable} />;
 }
 
-function Workspace({ user }: { user: User }) {
+function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHint; sessionAccount: string | null; authUnavailable: boolean }) {
   const [resources] = useState(() => { const db = new DriveCache(user.id); return { db, engine: new SyncEngine(db, browserClient(), user.id), uploads: new UploadManager(db) }; });
   const { db, engine, uploads } = resources;
   const sync = useSyncExternalStore(engine.subscribe, engine.getSnapshot, engine.getSnapshot);
@@ -92,8 +107,10 @@ function Workspace({ user }: { user: User }) {
   const list = useRef<VirtuosoHandle>(null), searchGeneration = useRef(0), sendLock = useRef(false);
   const onError = useCallback((value: string) => setError(value), []);
   const onEdit = useCallback((message: Message) => setDocumentState({ message }), []);
+  useEffect(() => { engine.setSessionAccount(sessionAccount); }, [engine, sessionAccount]);
   useEffect(() => {
     let disposed = false;
+    void engine.start().catch((e) => onError(`Unable to load local data: ${readableError(e)}`));
     void Promise.all([db.drafts.get("composer"), uploads.restore()]).then(([draft]) => {
       if (disposed) return;
       if (draft) setBody(plainText(draft.body));
@@ -103,7 +120,7 @@ function Workspace({ user }: { user: User }) {
         setBody([draft ? plainText(draft.body) : "", shared.slice(0, 100_000)].filter(Boolean).join("\n"));
         window.history.replaceState(null, "", "/");
       }
-      setDraftReady(true); return engine.start();
+      setDraftReady(true);
     }).catch((e) => onError(`Unable to load local data: ${readableError(e)}`));
     return () => { disposed = true; engine.stop(); uploads.stop(); };
   }, [db, engine, uploads, onError]);
@@ -120,7 +137,10 @@ function Workspace({ user }: { user: User }) {
     }, 250);
     return () => { clearTimeout(timer); searchGeneration.current++; };
   }, [query, filter, engine, sync.syncedAt, onError]);
-  const addFiles = useCallback((files: File[]) => { void uploads.add(files).catch((e) => onError(readableError(e))); }, [uploads, onError]);
+  const addFiles = useCallback((files: File[]) => {
+    if (sessionAccount !== user.id) { onError("Waiting for sign-in. Try again shortly."); return; }
+    void uploads.add(files).catch((e) => onError(readableError(e)));
+  }, [uploads, onError, sessionAccount, user.id]);
   const send = useCallback(async () => {
     if (!draftReady || sendLock.current) return;
     if (jobs.some((j) => j.state !== "done")) { onError("Finish or remove pending uploads."); return; }
@@ -136,7 +156,7 @@ function Workspace({ user }: { user: User }) {
   }, [body, jobs, draftReady, engine, db, uploads, onError]);
   const logout = async () => {
     if (!window.confirm("Sign out and clear local drafts and uploads? Saved messages and Drive files stay.")) return;
-    try { await api("/api/auth/logout"); engine.stop(); uploads.stop(); await db.delete(); window.location.reload(); }
+    try { await api("/api/auth/logout"); engine.stop(); uploads.stop(); saveAccountHint(null); await db.delete(); window.location.reload(); }
     catch (e) { onError(readableError(e)); }
   };
   const messages: VisibleMessage[] = useMemo(() => showSearch ? [...results].reverse() : sync.messages, [showSearch, results, sync.messages]);
@@ -151,7 +171,10 @@ function Workspace({ user }: { user: User }) {
   return <div className="app-shell"
     onDragOver={(e) => { if (Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); setDragging(true); } }}
     onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
-    onDrop={(e) => { e.preventDefault(); setDragging(false); addFiles(Array.from(e.dataTransfer.files)); }}>
+    onDrop={(e) => {
+      e.preventDefault(); setDragging(false);
+      void filesFromDrop(e.dataTransfer, 30 - jobs.length).then(addFiles).catch((e) => onError(readableError(e)));
+    }}>
     <aside className="sidebar">
       <Brand />
       <nav aria-label="Library" style={{ "--selection": filters.findIndex((item) => item.id === filter) } as CSSProperties}>
@@ -187,6 +210,7 @@ function Workspace({ user }: { user: User }) {
         {error && <button className="icon-button" aria-label="Dismiss" onClick={() => setError("")}><X size={17} /></button>}
       </div>}
       {!sync.online && <div className="offline-banner" role="status"><WifiOff size={15} />Offline</div>}
+      {sync.online && authUnavailable && <div className="notice" role="status"><span>Sign-in unavailable. Showing cached items.</span><button onClick={() => window.location.reload()}>Retry</button></div>}
       <section className="timeline" aria-label="Messages">
         {!sync.ready || searching ? <div className="timeline-empty" role="status" aria-label={searching ? "Searching" : "Loading"}><LoaderCircle className="spin" size={24} /></div>
           : !messages.length ? <div className="timeline-empty"><Inbox size={42} /><p>{showSearch ? "No results" : "No items"}</p></div>
@@ -224,7 +248,7 @@ function Workspace({ user }: { user: User }) {
             {job.state === "uploading"
               ? <button className="icon-button" aria-label={`Pause ${job.name}`} onClick={() => uploads.pause(job.id)}><Pause size={18} /></button>
               : ["failed", "paused"].includes(job.state)
-                ? <button className="icon-button" aria-label={`Resume ${job.name}`} onClick={() => {
+                ? <button className="icon-button" aria-label={`Resume ${job.name}`} disabled={sessionAccount !== user.id} onClick={() => {
                     if (uploads.hasFile(job.id)) void uploads.resume(job.id).catch((e) => onError(readableError(e)));
                     else { resumeId.current = job.id; resumeInput.current?.click(); }
                   }}><Play size={18} /></button>

@@ -4,6 +4,41 @@ import { DriveCache, type UploadRecord } from "./cache";
 import type { Attachment } from "./model";
 
 export type UploadJob = UploadRecord & { state: "queued" | "uploading" | "paused" | "failed" | "done"; error?: string };
+
+export async function filesFromDrop(data: DataTransfer, limit = 30): Promise<File[]> {
+  // Capture entries synchronously: the drag data store is protected after the event.
+  const items = Array.from(data.items ?? []).filter(item => item.kind === "file").map(item => ({ entry: item.webkitGetAsEntry?.(), file: item.getAsFile() }));
+  const fallback = Array.from(data.files);
+  const files: File[] = [];
+  const add = (file: File) => {
+    if (files.length >= limit) throw new Error(`Up to ${limit} more files. Send the current attachments first.`);
+    files.push(file);
+  };
+  async function visit(entry: FileSystemEntry) {
+    if (entry.isFile) {
+      const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, () => reject(new Error(`Couldn't read ${entry.name}.`))));
+      add(file);
+    } else if (entry.isDirectory) {
+      const reader = (entry as FileSystemDirectoryEntry).createReader();
+      // Browsers return directory contents in batches, not necessarily one call.
+      while (true) {
+        const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, () => reject(new Error(`Couldn't read folder ${entry.name}.`))));
+        if (!batch.length) break;
+        for (const child of batch) await visit(child);
+      }
+    }
+  }
+  if (items.length) {
+    for (const item of items) {
+      if (item.entry) await visit(item.entry);
+      else if (item.file) add(item.file);
+      else throw new Error("Can't read this drop. Choose the files inside the folder.");
+    }
+  } else fallback.forEach(add);
+  if (!files.length) throw new Error("No files found. Empty folders aren't uploaded.");
+  return files;
+}
+
 export class UploadManager {
   private jobs: UploadJob[] = [];
   private files = new Map<string, File>();

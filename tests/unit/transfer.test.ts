@@ -1,5 +1,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { boundedBlob, DriveClient } from "@/lib/drive";
+import { filesFromDrop } from "@/lib/uploads";
+
+describe("folder drops", () => {
+  const file = (name: string, contents = "contents") => ({ name, isFile: true, isDirectory: false, file: (accept: (file: File) => void) => accept(new File([contents], name)) }) as FileSystemFileEntry;
+  const folder = (name: string, batches: FileSystemEntry[][]) => ({ name, isDirectory: true, isFile: false, createReader: () => {
+    let index = 0;
+    return { readEntries: (accept: (entries: FileSystemEntry[]) => void) => accept(batches[index++] ?? []) };
+  } }) as FileSystemDirectoryEntry;
+  const drop = (entry: FileSystemEntry) => ({ items: [{ kind: "file", webkitGetAsEntry: () => entry, getAsFile: () => new File([], entry.name) }], files: [] }) as unknown as DataTransfer;
+
+  it("reads nested directories and every batch, never the folder placeholder", async () => {
+    const files = await filesFromDrop(drop(folder("Trip", [[file("one.txt")], [folder("Nested", [[file("empty.txt", ""), file("two.txt")]])]])));
+    expect(files.map(f => [f.name, f.size])).toEqual([["one.txt", 8], ["empty.txt", 0], ["two.txt", 8]]);
+    expect(await files[2].text()).toBe("contents");
+  });
+  it("rejects empty, unreadable, or over-limit folders without returning partial files", async () => {
+    await expect(filesFromDrop(drop(folder("Empty", [])))).rejects.toThrow("Empty folders");
+    await expect(filesFromDrop(drop(folder("Large", [[file("one"), file("two")]])), 1)).rejects.toThrow("Up to 1 more files");
+    const unreadable = { name: "Denied", isFile: false, isDirectory: true, createReader: () => ({ readEntries: (_ok: unknown, fail: () => void) => fail() }) } as unknown as FileSystemDirectoryEntry;
+    await expect(filesFromDrop(drop(unreadable))).rejects.toThrow("Couldn't read folder Denied");
+  });
+  it("supports ordinary files when directory entries are unavailable", async () => {
+    const original = new File([], "empty.txt");
+    const data = { items: [{ kind: "file", getAsFile: () => original }], files: [original] } as unknown as DataTransfer;
+    expect(await filesFromDrop(data)).toEqual([original]);
+  });
+});
 
 afterEach(() => vi.unstubAllGlobals());
 describe("bounded-memory transfers", () => {
