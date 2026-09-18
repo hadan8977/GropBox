@@ -3,7 +3,7 @@ import { DriveClient, DriveError, delay } from "./drive";
 import { DriveCache, type UploadRecord } from "./cache";
 import type { Attachment } from "./model";
 
-export type UploadJob = UploadRecord & { state: "queued" | "uploading" | "paused" | "failed" | "done"; error?: string };
+export type UploadJob = UploadRecord & { state: "staged" | "queued" | "uploading" | "paused" | "failed" | "done"; error?: string };
 
 export async function filesFromDrop(data: DataTransfer, limit = 30): Promise<File[]> {
   // Capture entries synchronously: the drag data store is protected after the event.
@@ -65,9 +65,29 @@ export class UploadManager {
     for (const file of files) {
       if (this.disposed) return;
       const record: UploadRecord = { id: crypto.randomUUID(), name: file.name, size: file.size, mimeType: file.type || "application/octet-stream", lastModified: file.lastModified, uploaded: 0, sendOnComplete };
-      await this.db.uploads.put(record); this.files.set(record.id, file); this.jobs = [...this.jobs, { ...record, state: "queued" }];
+      await this.db.uploads.put(record); this.files.set(record.id, file); this.jobs = [...this.jobs, { ...record, state: sendOnComplete ? "queued" : "staged" }];
     }
     this.notify(); this.pump();
+  }
+  async uploadForMessage(ids: string[]): Promise<UploadJob[]> {
+    const selected = this.jobs.filter((job) => ids.includes(job.id));
+    if (this.disposed) throw new DOMException("Stopped", "AbortError");
+    if (selected.length !== ids.length || selected.some((job) => job.sendOnComplete)) throw new Error("Attachments changed. Try again.");
+    if (selected.some((job) => !job.attachment && !this.files.has(job.id))) throw new Error("Select the original file to resume.");
+    this.jobs = this.jobs.map((job) => ids.includes(job.id) && !["done", "uploading"].includes(job.state) ? { ...job, state: "queued", error: undefined } : job);
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        const current = this.jobs.filter((job) => ids.includes(job.id));
+        const failed = current.find((job) => job.state === "failed");
+        if (this.disposed || current.length !== ids.length || failed) {
+          unsubscribe(); reject(new Error(failed?.error ?? (this.disposed ? "Upload stopped." : "Attachment removed. Message kept as a draft.")));
+        } else if (current.every((job) => job.state === "done")) {
+          unsubscribe(); resolve(current);
+        }
+      };
+      const unsubscribe = this.subscribe(check);
+      this.notify(); this.pump(); check();
+    });
   }
   async resume(id: string, file?: File) {
     const job = this.jobs.find((j) => j.id === id); if (!job) return;
@@ -85,7 +105,7 @@ export class UploadManager {
     this.jobs = this.jobs.filter((j) => j.id !== id); this.notify();
   }
   consumeDone() { this.jobs = this.jobs.filter((job) => job.state !== "done"); this.notify(); }
-  stop() { this.disposed = true; this.access = undefined; this.controllers.forEach((controller) => controller.abort()); }
+  stop() { this.disposed = true; this.access = undefined; this.controllers.forEach((controller) => controller.abort()); this.notify(); }
   private pump() {
     if (this.disposed) return;
     for (const job of this.jobs) {

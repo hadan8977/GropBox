@@ -168,11 +168,63 @@ test("folder drops upload nested file contents instead of a directory placeholde
 test("preserves failed content and accepts a small file upload", async ({ page, context }) => {
   const rows: Message[] = []; await connect(context, rows, true); await open(page);
   await page.locator('input[aria-label="Choose files"]').setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello drive") });
-  await expect(page.getByText("Ready", { exact: false })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".upload-list").getByText("Attached", { exact: false })).toBeVisible();
   await page.getByRole("textbox", { name: "Message" }).fill("Keep these unsent changes."); await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByRole("status", { name: "Not sent" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Messages" }).getByText("Keep these unsent changes.", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(""); expect(rows).toHaveLength(0);
+});
+for (const source of ["picker", "paste", "composer drop"] as const) test(`${source} stages attachments until one Send uploads and publishes the message`, async ({ page, context }, info) => {
+  const rows: Message[] = []; await connect(context, rows);
+  let starts = 0, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await context.route("**/api/drive/uploads", async route => {
+    if (route.request().postDataJSON().action === "prepare") { starts++; await gate; }
+    await route.fallback();
+  });
+  try {
+    await open(page);
+    const composer = page.getByRole("textbox", { name: "Message" });
+    await composer.fill("Caption for this file.");
+    if (source === "picker") {
+      const selecting = page.waitForEvent("filechooser");
+      await page.getByRole("button", { name: "Attach files" }).click();
+      await (await selecting).setFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello drive") });
+    } else {
+      const data = await page.evaluateHandle(() => { const data = new DataTransfer(); data.items.add(new File(["hello drive"], "notes.txt", { type: "text/plain" })); return data; });
+      try {
+        if (source === "paste") await composer.evaluate((element, clipboardData) => {
+          element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+        }, data);
+        else {
+          await page.locator(".app-shell").dispatchEvent("dragover", { dataTransfer: data });
+          await composer.dispatchEvent("dragover", { dataTransfer: data });
+          await expect(page.locator(".drop-overlay")).toHaveCount(0);
+          await expect(page.locator(".composer-zone")).toHaveAttribute("data-dragging", "true");
+          await composer.dispatchEvent("drop", { dataTransfer: data });
+        }
+      } finally { await data.dispose(); }
+    }
+    await expect(page.locator(".upload-list").getByText("Attached", { exact: false })).toBeVisible();
+    await expect(page.getByRole("img", { name: "Attached notes.txt" })).toBeVisible();
+    expect(starts).toBe(0); expect(rows).toHaveLength(0);
+    if (source === "composer drop") {
+      await expect(page.locator(".upload-list")).toHaveCSS("opacity", "1");
+      await expect(page.locator(".upload-list")).toHaveCSS("transform", "none");
+      await page.screenshot({ path: info.outputPath("staged.png"), fullPage: true });
+    }
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect.poll(() => starts).toBe(1);
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+    await expect(page.getByRole("progressbar", { name: "Upload notes.txt" })).toBeVisible();
+    expect(rows).toHaveLength(0);
+    release();
+    await expect(page.getByRole("status", { name: "Sent", exact: true })).toBeVisible();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ body: "Caption for this file.", attachments: [{ name: "notes.txt", size: 11 }] });
+    await expect(composer).toHaveValue("");
+    await expect(page.locator(".upload-list")).toHaveCount(0);
+  } finally { release(); }
 });
 test("creates a document with plain-text editing", async ({ page, context }) => {
   const rows: Message[] = []; await connect(context, rows); await open(page);

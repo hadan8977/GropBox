@@ -28,7 +28,7 @@ Files live under `GropBox/Files/YYYY-MM`; versioned message and note archives us
 
 ## Files and archives
 
-Uploads go directly from browser to Drive in 8 MiB chunks, with up to two concurrent uploads and 30 queued files. Dropped files automatically enter the message outbox individually after upload completion, without sending or clearing the text draft. Files selected with Attach or pasted into the composer still wait for Send so they can accompany a message. Upload progress is not a delivery receipt.
+Uploads go directly from browser to Drive in 8 MiB chunks, with up to two concurrent uploads and 30 queued files. Dropping outside the composer starts upload immediately and sends each completed file without touching the text draft. Dropping inside the composer, selecting Attach, or pasting files stages local attachments without uploading. One Send click uploads those attachments, then queues them with the text as a single message. Failed uploads keep the draft and attachments for retry; pausing waits for Resume. Upload progress is not a delivery receipt.
 
 Folder drops recursively collect files, including nested directories, into the existing monthly Drive folder. Source directory hierarchy and empty folders are not recreated. Unreadable or over-limit folders are rejected before starting a partial upload.
 

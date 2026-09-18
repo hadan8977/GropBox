@@ -107,7 +107,7 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
   const [filter, setFilter] = useState<"all" | "files" | "documents" | "pinned">("all");
   const [results, setResults] = useState<Message[]>([]), [searching, setSearching] = useState(false);
   const [error, setError] = useState(""), [documentState, setDocumentState] = useState<{ message?: Message }>();
-  const [settings, setSettings] = useState(false), [dragging, setDragging] = useState(false);
+  const [settings, setSettings] = useState(false), [dragging, setDragging] = useState<"send" | "attach" | false>(false);
   const showSearch = Boolean(query.trim()) || filter !== "all";
   const activity = useMessageActivity(engine, !showSearch && !settings && !documentState);
   const fileInput = useRef<HTMLInputElement>(null), resumeInput = useRef<HTMLInputElement>(null), resumeId = useRef<string>("");
@@ -146,17 +146,18 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
   }, [query, filter, engine, sync.syncedAt, onError]);
   const addFiles = useCallback((files: File[], sendOnComplete = false) => {
     if (sessionAccount !== user.id) { onError("Waiting for sign-in. Try again shortly."); return; }
+    if (!sendOnComplete && sendLock.current) { onError("Wait for this message to finish sending."); return; }
     void uploads.add(files, sendOnComplete).catch((e) => onError(readableError(e)));
   }, [uploads, onError, sessionAccount, user.id]);
   const send = useCallback(async () => {
     if (!draftReady || sendLock.current) return;
-    const attachments = jobs.filter((job) => !job.sendOnComplete);
-    if (attachments.some((j) => j.state !== "done")) { onError("Finish or remove pending uploads."); return; }
-    if (!plainText(body).trim() && !attachments.length) return;
+    const uploadIds = jobs.filter((job) => !job.sendOnComplete).map((job) => job.id);
+    if (!plainText(body).trim() && !uploadIds.length) return;
     sendLock.current = true; setSending(true);
     try {
+      const attachments = await uploads.uploadForMessage(uploadIds);
       const mutation: Mutation = { operationId: crypto.randomUUID(), id: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", title: "", body, attachments: attachments.flatMap((j) => j.attachment ? [j.attachment] : []), pinned: false, deleted: false };
-      if (!await engine.enqueue(mutation, { draftId: "composer", uploadIds: attachments.map((job) => job.id) })) throw new Error("Attachments changed in another tab. Reload and try again.");
+      if (!await engine.enqueue(mutation, { draftId: "composer", uploadIds })) throw new Error("Attachments changed in another tab. Reload and try again.");
       uploads.consumeDone();
       setBody(""); setQuery(""); setFilter("all");
       setTimeout(() => list.current?.scrollToIndex({ index: "LAST", behavior: "auto" }), 100);
@@ -178,9 +179,10 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
     { id: "pinned", name: "Pinned", icon: Pin },
   ] as const;
   return <div className="app-shell"
-    onDragOver={(e) => { if (Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); setDragging(true); } }}
+    onDragOver={(e) => { if (Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); setDragging("send"); } }}
     onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
     onDrop={(e) => {
+      if (!Array.from(e.dataTransfer.types).includes("Files")) return;
       e.preventDefault(); setDragging(false);
       void filesFromDrop(e.dataTransfer, 30 - jobs.length).then((files) => addFiles(files, true)).catch((e) => onError(readableError(e)));
     }}>
@@ -245,12 +247,22 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
             if (activity.atBottom) activity.readLatest();
           }}><ArrowDown size={18} />{!showSearch && activity.unread.length > 0 && <span>{activity.unread.length} new</span>}</button>}
       </section>
-      <div className="composer-zone">
+      <div className="composer-zone" data-dragging={dragging === "attach" || undefined}
+        onDragOver={(e) => {
+          if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+          e.preventDefault(); e.stopPropagation(); setDragging("attach");
+        }}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
+        onDrop={(e) => {
+          if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+          e.preventDefault(); e.stopPropagation(); setDragging(false);
+          void filesFromDrop(e.dataTransfer, 30 - jobs.length).then((files) => addFiles(files)).catch((e) => onError(readableError(e)));
+        }}>
         {jobs.length > 0 && <div className="upload-list" aria-label="Uploads">
           {jobs.map((job) => <div key={job.id} className="upload-job">
             <TransferProgress job={job} />
             <div><strong>{job.name}</strong><span>{formatBytes(job.size)} · {job.error ?? ({
-              queued: "Queued", uploading: `${Math.floor(job.size ? job.uploaded / job.size * 100 : 0)}%`,
+              staged: "Attached", queued: "Queued", uploading: `${Math.floor(job.size ? job.uploaded / job.size * 100 : 0)}%`,
               paused: "Paused", failed: "Failed", done: "Ready",
             }[job.state])}</span>
             </div>
@@ -261,12 +273,12 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
                     if (uploads.hasFile(job.id)) void uploads.resume(job.id).catch((e) => onError(readableError(e)));
                     else { resumeId.current = job.id; resumeInput.current?.click(); }
                   }}><Play size={18} /></button>
-                : job.state === "done" ? null : <LoaderCircle size={18} className="spin" />}
+                : ["done", "staged"].includes(job.state) ? null : <LoaderCircle size={18} className="spin" />}
             <button className="icon-button" aria-label={`Remove ${job.name}`} onClick={() => void uploads.remove(job.id).catch((e) => onError(readableError(e)))}><X size={18} /></button>
           </div>)}
         </div>}
         <div className="composer">
-          <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} disabled={!draftReady} aria-label="Attach files" title="Attach files"><Paperclip size={22} /></button>
+          <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} disabled={!draftReady || sending} aria-label="Attach files" title="Attach files"><Paperclip size={22} /></button>
           <Editor value={body} onChange={setBody} onSend={() => void send()} onFiles={addFiles} disabled={!draftReady || sending} />
           <button className="send-button" aria-label="Send" title="Send" onClick={() => void send()}
             disabled={!draftReady || sending || (!body.trim() && !jobs.some((job) => !job.sendOnComplete))}>
@@ -274,7 +286,7 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
           </button>
         </div>
       </div>
-      {dragging && <div className="drop-overlay"><div className="drop-orbit"><UploadCloud size={52} /></div><h2>Drop files</h2></div>}
+      {dragging === "send" && <div className="drop-overlay"><div className="drop-orbit"><UploadCloud size={52} /></div><h2>Drop files</h2></div>}
     </main>
     <input ref={fileInput} type="file" multiple hidden aria-label="Choose files" onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ""; }} />
     <input ref={resumeInput} type="file" hidden aria-label="Resume file" onChange={(e) => {

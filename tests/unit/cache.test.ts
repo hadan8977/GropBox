@@ -12,6 +12,54 @@ afterEach(async () => { await db.delete(); vi.unstubAllGlobals(); });
 const mutation = (): Mutation => ({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", body: "Offline draft", title: "", pinned: false, deleted: false, attachments: [] });
 
 describe("local outbox transaction", () => {
+  it("stages composer files without network traffic and uploads only when Send is requested", async () => {
+    const attachment = { id: "file-id", name: "note.txt", size: 4, mimeType: "text/plain" };
+    const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({ fileId: attachment.id, folderId: "folder-id", attachment })));
+    vi.stubGlobal("fetch", request);
+    const publish = vi.fn(), upload = new UploadManager(db, publish);
+    try {
+      await upload.add([new File(["note"], "note.txt", { type: "text/plain" })]);
+      expect(upload.getSnapshot()[0].state).toBe("staged"); expect(request).not.toHaveBeenCalled();
+      const id = upload.getSnapshot()[0].id;
+      const completed = await upload.uploadForMessage([id]);
+      expect(completed).toMatchObject([{ id, state: "done", attachment }]);
+      expect(request).toHaveBeenCalledTimes(1); expect(publish).not.toHaveBeenCalled();
+      expect((await db.uploads.get(id))?.attachment).toEqual(attachment);
+    } finally { upload.stop(); }
+  });
+  it("keeps a failed staged upload for retry without selecting the file again", async () => {
+    const attachment = { id: "file-id", name: "note.txt", size: 4, mimeType: "text/plain" };
+    const request = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: "Upload refused" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ fileId: attachment.id, folderId: "folder-id", attachment })));
+    vi.stubGlobal("fetch", request);
+    const upload = new UploadManager(db, vi.fn());
+    try {
+      await upload.add([new File(["note"], "note.txt", { type: "text/plain" })]);
+      const id = upload.getSnapshot()[0].id;
+      await expect(upload.uploadForMessage([id])).rejects.toThrow("Upload refused");
+      expect(upload.hasFile(id)).toBe(true); expect(await db.uploads.get(id)).toBeDefined();
+      expect(await upload.uploadForMessage([id])).toMatchObject([{ state: "done", attachment }]);
+    } finally { upload.stop(); }
+  });
+  it("settles an in-progress composer send when uploads stop", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ fileId: "file-id", folderId: "folder-id" }))));
+    const upload = new UploadManager(db, vi.fn());
+    await upload.add([new File(["note"], "note.txt", { type: "text/plain" })]);
+    const sending = upload.uploadForMessage([upload.getSnapshot()[0].id]);
+    upload.stop();
+    await expect(sending).rejects.toThrow("Upload stopped.");
+  });
+  it("keeps previously completed manual attachments pending until Send, without uploading again", async () => {
+    const id = crypto.randomUUID(), attachment = { id: "file-id", name: "note.txt", size: 4, mimeType: "text/plain" };
+    await db.uploads.put({ id, name: attachment.name, size: 4, mimeType: attachment.mimeType, lastModified: 0, uploaded: 4, attachment, sendOnComplete: false });
+    const request = vi.fn(), publish = vi.fn(), upload = new UploadManager(db, publish); vi.stubGlobal("fetch", request);
+    try {
+      await upload.restore();
+      expect(upload.getSnapshot()[0].state).toBe("done"); expect(publish).not.toHaveBeenCalled();
+      expect(await upload.uploadForMessage([id])).toMatchObject([{ attachment }]);
+      expect(request).not.toHaveBeenCalled();
+    } finally { upload.stop(); }
+  });
   it("claims an auto-sent upload once across tabs without consuming the text draft", async () => {
     const id = crypto.randomUUID(), attachment = { id: "file-id", name: "note.txt", size: 4, mimeType: "text/plain" };
     await db.uploads.put({ id, name: attachment.name, size: 4, mimeType: attachment.mimeType, lastModified: 0, uploaded: 4, attachment, sendOnComplete: true });
