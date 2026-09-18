@@ -30,6 +30,18 @@ describe("folder drops", () => {
 
 afterEach(() => vi.unstubAllGlobals());
 describe("bounded-memory transfers", () => {
+  it("uses Drive's browser download link without fetching file bytes or adding an access token", async () => {
+    const link = "https://drive.google.com/uc?id=file-id&export=download";
+    const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({ webContentLink: link })));
+    expect(await new DriveClient(async () => "test-access", request).downloadLink("file-id")).toBe(link);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][0]).toContain("?fields=");
+    expect(request.mock.calls[0][0]).not.toContain("alt=media");
+  });
+  it.each([undefined, "javascript:alert(1)", "https://drive.google.com.evil.test/file", "https://user:password@drive.google.com/file"])("rejects an unavailable or unsafe browser download link: %s", async link => {
+    const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({ webContentLink: link })));
+    await expect(new DriveClient(async () => "test-access", request).downloadLink("file-id")).rejects.toThrow();
+  });
   it("uploads a file larger than 5 GiB in 8 MiB chunks, with exact final ranges", async () => {
     const total = 5 * 1024 ** 3 + 17, offset = 5 * 1024 ** 3;
     const calls: { headers: Record<string,string>; bytes: number }[] = [];

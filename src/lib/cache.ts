@@ -21,7 +21,7 @@ export function saveAccountHint(user: AccountHint | null) {
 export type PendingRecord = { id: string; mutation: Mutation; createdAt: string; error?: string; blocked?: boolean };
 export type UploadRecord = {
   id: string; name: string; size: number; mimeType: string; lastModified: number;
-  sessionUrl?: string; fileId?: string; folderId?: string; uploaded: number; attachment?: Attachment;
+  sessionUrl?: string; fileId?: string; folderId?: string; uploaded: number; attachment?: Attachment; sendOnComplete?: boolean;
 };
 export type Draft = { id: string; body: RichNode | string; attachments: Attachment[]; title?: string; format?: "rich" | "text" | "markdown" };
 

@@ -28,11 +28,15 @@ Files live under `GropBox/Files/YYYY-MM`; versioned message and note archives us
 
 ## Files and archives
 
-Uploads go directly from browser to Drive in 8 MiB chunks, with up to two concurrent uploads and 30 queued files. A file becomes visible on other devices after upload completion and Send. Upload progress is not a delivery receipt.
+Uploads go directly from browser to Drive in 8 MiB chunks, with up to two concurrent uploads and 30 queued files. Dropped files automatically enter the message outbox individually after upload completion, without sending or clearing the text draft. Files selected with Attach or pasted into the composer still wait for Send so they can accompany a message. Upload progress is not a delivery receipt.
 
 Folder drops recursively collect files, including nested directories, into the existing monthly Drive folder. Source directory hierarchy and empty folders are not recreated. Unreadable or over-limit folders are rejected before starting a partial upload.
 
-Reopening a paused upload may require selecting the original file again. Background tabs and locked phones may suspend work. File downloads use streaming where supported, otherwise bounded buffers or the Drive page.
+Reopening a paused upload may require selecting the original file again. Completed auto-send jobs resume from local checkpoints without re-uploading. Background tabs and locked phones may suspend work.
+
+File downloads follow Drive's [browser download link](https://developers.google.com/workspace/drive/api/guides/manage-downloads), with no app save-location picker, whole-file buffer, Vercel file proxy, or access token in the URL. Google may require sign-in or a download confirmation. Save prompts, progress UI, and notifications depend on the browser and its settings.
+
+Share is shown only when the browser supports sharing that file type, up to 20 MiB. It sends the actual file through the system share sheet, not a public Drive link. A slow file fetch can exhaust the [required user activation](https://www.w3.org/TR/web-share/#share-method); the prepared file then stays in memory for a fresh Share tap. Canceling is not an error, and Drive permissions are never changed.
 
 Archiving is queued in the same transaction as a message mutation. Online requests process bounded batches; Vercel's daily cron supplements them. Leases, retries, and stable IDs protect against interrupted jobs. Archive lag is possible; JSON archives are not a complete database backup or an automatic restore facility.
 

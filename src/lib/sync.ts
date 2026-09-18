@@ -155,13 +155,18 @@ export class SyncEngine {
   }
   async enqueue(mutation: Mutation, consume: { draftId?: string; uploadIds?: string[] } = {}) {
     const valid = mutationSchema.parse(mutation);
-    await this.db.transaction("rw", this.db.pending, this.db.drafts, this.db.uploads, async () => {
+    const queued = await this.db.transaction("rw", this.db.pending, this.db.drafts, this.db.uploads, async () => {
+      // Claim completed uploads in the same transaction as the outbox write.
+      // Another tab may already have sent them while this tab was restoring.
+      if (consume.uploadIds?.length && (await this.db.uploads.bulkGet(consume.uploadIds)).some((job) => !job)) return false;
       if ((await this.db.pending.toArray()).some((p) => p.mutation.id === valid.id)) throw new Error("Resolve pending changes first.");
       await this.db.pending.put({ id: valid.operationId, mutation: valid, createdAt: new Date().toISOString() });
       if (consume.draftId) await this.db.drafts.delete(consume.draftId);
       if (consume.uploadIds?.length) await this.db.uploads.bulkDelete(consume.uploadIds);
+      return true;
     });
     await this.reload(); void this.flush();
+    return queued;
   }
   async discard(id: string) { await this.db.pending.where("id").equals(id).delete(); await this.reload(); }
   async retry(id: string) { await this.db.pending.update(id, { error: undefined, blocked: false }); void this.flush(); }

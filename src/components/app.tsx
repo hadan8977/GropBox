@@ -91,7 +91,14 @@ function AuthGate() {
 }
 
 function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHint; sessionAccount: string | null; authUnavailable: boolean }) {
-  const [resources] = useState(() => { const db = new DriveCache(user.id); return { db, engine: new SyncEngine(db, browserClient(), user.id), uploads: new UploadManager(db) }; });
+  const [resources] = useState(() => {
+    const db = new DriveCache(user.id), engine = new SyncEngine(db, browserClient(), user.id);
+    const uploads = new UploadManager(db, async (job) => {
+      if (!job.attachment) throw new Error("Upload is not complete.");
+      await engine.enqueue({ operationId: job.id, id: job.id, expectedVersion: 0, kind: "message", format: "text", title: "", body: "", attachments: [job.attachment], pinned: false, deleted: false }, { uploadIds: [job.id] });
+    });
+    return { db, engine, uploads };
+  });
   const { db, engine, uploads } = resources;
   const sync = useSyncExternalStore(engine.subscribe, engine.getSnapshot, engine.getSnapshot);
   const jobs = useSyncExternalStore(uploads.subscribe, uploads.getSnapshot, uploads.getSnapshot);
@@ -137,18 +144,20 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
     }, 250);
     return () => { clearTimeout(timer); searchGeneration.current++; };
   }, [query, filter, engine, sync.syncedAt, onError]);
-  const addFiles = useCallback((files: File[]) => {
+  const addFiles = useCallback((files: File[], sendOnComplete = false) => {
     if (sessionAccount !== user.id) { onError("Waiting for sign-in. Try again shortly."); return; }
-    void uploads.add(files).catch((e) => onError(readableError(e)));
+    void uploads.add(files, sendOnComplete).catch((e) => onError(readableError(e)));
   }, [uploads, onError, sessionAccount, user.id]);
   const send = useCallback(async () => {
     if (!draftReady || sendLock.current) return;
-    if (jobs.some((j) => j.state !== "done")) { onError("Finish or remove pending uploads."); return; }
-    if (!plainText(body).trim() && !jobs.length) return;
+    const attachments = jobs.filter((job) => !job.sendOnComplete);
+    if (attachments.some((j) => j.state !== "done")) { onError("Finish or remove pending uploads."); return; }
+    if (!plainText(body).trim() && !attachments.length) return;
     sendLock.current = true; setSending(true);
     try {
-      const mutation: Mutation = { operationId: crypto.randomUUID(), id: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", title: "", body, attachments: jobs.flatMap((j) => j.attachment ? [j.attachment] : []), pinned: false, deleted: false };
-      await engine.enqueue(mutation, { draftId: "composer", uploadIds: jobs.map((job) => job.id) }); uploads.consumeDone();
+      const mutation: Mutation = { operationId: crypto.randomUUID(), id: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", title: "", body, attachments: attachments.flatMap((j) => j.attachment ? [j.attachment] : []), pinned: false, deleted: false };
+      if (!await engine.enqueue(mutation, { draftId: "composer", uploadIds: attachments.map((job) => job.id) })) throw new Error("Attachments changed in another tab. Reload and try again.");
+      uploads.consumeDone();
       setBody(""); setQuery(""); setFilter("all");
       setTimeout(() => list.current?.scrollToIndex({ index: "LAST", behavior: "auto" }), 100);
     } catch (e) { onError(readableError(e)); }
@@ -173,7 +182,7 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
     onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
     onDrop={(e) => {
       e.preventDefault(); setDragging(false);
-      void filesFromDrop(e.dataTransfer, 30 - jobs.length).then(addFiles).catch((e) => onError(readableError(e)));
+      void filesFromDrop(e.dataTransfer, 30 - jobs.length).then((files) => addFiles(files, true)).catch((e) => onError(readableError(e)));
     }}>
     <aside className="sidebar">
       <Brand />
@@ -260,7 +269,7 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
           <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} disabled={!draftReady} aria-label="Attach files" title="Attach files"><Paperclip size={22} /></button>
           <Editor value={body} onChange={setBody} onSend={() => void send()} onFiles={addFiles} disabled={!draftReady || sending} />
           <button className="send-button" aria-label="Send" title="Send" onClick={() => void send()}
-            disabled={!draftReady || sending || (!body.trim() && !jobs.length)}>
+            disabled={!draftReady || sending || (!body.trim() && !jobs.some((job) => !job.sendOnComplete))}>
             {sending ? <LoaderCircle size={22} className="spin" /> : <ArrowUp size={24} />}
           </button>
         </div>

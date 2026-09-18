@@ -48,7 +48,7 @@ export class UploadManager {
   private tokenRequest?: Promise<string>;
   private disposed = false;
   readonly drive: DriveClient;
-  constructor(private db: DriveCache) { this.drive = new DriveClient((force) => this.token(force)); }
+  constructor(private db: DriveCache, private publish: (job: UploadRecord) => Promise<void>) { this.drive = new DriveClient((force) => this.token(force)); }
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   getSnapshot = () => this.jobs;
   private notify() { this.listeners.forEach((fn) => fn()); }
@@ -59,12 +59,12 @@ export class UploadManager {
     if (!this.tokenRequest) this.tokenRequest = api<{ token: string; expiresAt: number }>(`/api/drive/token${force ? "?force=1" : ""}`).then((data) => { this.access = data; return data.token; }).finally(() => { this.tokenRequest = undefined; });
     return this.tokenRequest;
   }
-  async restore() { this.disposed = false; this.jobs = (await this.db.uploads.toArray()).map((j) => ({ ...j, state: j.attachment ? "done" : "paused" })); this.notify(); }
-  async add(files: File[]) {
+  async restore() { this.disposed = false; this.jobs = (await this.db.uploads.toArray()).map((j) => ({ ...j, state: j.attachment ? (j.sendOnComplete ? "queued" : "done") : "paused" })); this.notify(); this.pump(); }
+  async add(files: File[], sendOnComplete = false) {
     if (this.jobs.length + files.length > 30) throw new Error("Up to 30 files. Send the current attachments first.");
     for (const file of files) {
       if (this.disposed) return;
-      const record: UploadRecord = { id: crypto.randomUUID(), name: file.name, size: file.size, mimeType: file.type || "application/octet-stream", lastModified: file.lastModified, uploaded: 0 };
+      const record: UploadRecord = { id: crypto.randomUUID(), name: file.name, size: file.size, mimeType: file.type || "application/octet-stream", lastModified: file.lastModified, uploaded: 0, sendOnComplete };
       await this.db.uploads.put(record); this.files.set(record.id, file); this.jobs = [...this.jobs, { ...record, state: "queued" }];
     }
     this.notify(); this.pump();
@@ -75,10 +75,10 @@ export class UploadManager {
       if (file.name !== job.name || file.size !== job.size || file.lastModified !== job.lastModified) throw new Error("Choose the original file to resume.");
       this.files.set(id, file);
     }
-    if (!this.files.has(id)) throw new Error("Choose the original file to resume.");
+    if (!job.attachment && !this.files.has(id)) throw new Error("Choose the original file to resume.");
     this.patch(id, { state: "queued", error: undefined }); this.pump();
   }
-  hasFile(id: string) { return this.files.has(id); }
+  hasFile(id: string) { return this.files.has(id) || Boolean(this.jobs.find((job) => job.id === id)?.attachment); }
   pause(id: string) { this.controllers.get(id)?.abort(); this.patch(id, { state: "paused" }); }
   async remove(id: string) {
     this.controllers.get(id)?.abort(); this.files.delete(id); await this.db.uploads.delete(id);
@@ -103,6 +103,7 @@ export class UploadManager {
   private async run(job: UploadJob, signal: AbortSignal) {
     this.patch(job.id, { state: "uploading", error: undefined });
     try {
+      if (job.attachment) { await this.finish(job); return; }
       const file = this.files.get(job.id); if (!file) throw new Error("Choose the original file.");
       const prepared = await api<{ fileId: string; folderId: string; attachment?: Attachment }>("/api/drive/uploads", {
         action: "prepare", uploadId: job.id, name: job.name, size: job.size, mimeType: job.mimeType,
@@ -144,7 +145,16 @@ export class UploadManager {
       signal.throwIfAborted();
       const attachment = prepared.attachment ?? await api<Attachment>("/api/drive/uploads", { action: "complete", uploadId: job.id });
       await this.persist(job.id, { attachment, uploaded: job.size });
-      this.patch(job.id, { state: "done" }); this.files.delete(job.id);
+      signal.throwIfAborted();
+      await this.finish({ ...job, attachment });
     } catch (error) { this.patch(job.id, { state: signal.aborted ? "paused" : "failed", error: signal.aborted ? undefined : readableError(error) }); }
+  }
+  private async finish(job: UploadRecord) {
+    if (this.disposed) throw new DOMException("Stopped", "AbortError");
+    if (job.sendOnComplete) {
+      await this.publish(job);
+      this.jobs = this.jobs.filter((item) => item.id !== job.id); this.notify();
+    } else this.patch(job.id, { state: "done" });
+    this.files.delete(job.id);
   }
 }

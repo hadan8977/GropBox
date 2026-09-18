@@ -127,6 +127,13 @@ export class DriveClient {
     // A large streamed download must not inherit the 30-second metadata deadline.
     return this.request(`${API}/files/${validId(id)}?alt=media`, { signal: signal ?? new AbortController().signal });
   }
+  async downloadLink(id: string) {
+    const file = await this.metadata(id);
+    if (!file.webContentLink || file.trashed) throw new Error("Download unavailable. Check the file in Drive.");
+    const url = new URL(file.webContentLink);
+    if (url.protocol !== "https:" || !["drive.google.com", "drive.usercontent.google.com"].includes(url.hostname) || url.port || url.username || url.password) throw new Error("Invalid Drive download link.");
+    return url.href;
+  }
 }
 
 export function rangeOffset(range: string | null) {

@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DriveCache } from "@/lib/cache";
 import { SyncEngine } from "@/lib/sync";
+import { UploadManager } from "@/lib/uploads";
 import type { Mutation } from "@/lib/model";
 
 let db: DriveCache;
@@ -11,6 +12,35 @@ afterEach(async () => { await db.delete(); vi.unstubAllGlobals(); });
 const mutation = (): Mutation => ({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: 0, kind: "message", format: "text", body: "Offline draft", title: "", pinned: false, deleted: false, attachments: [] });
 
 describe("local outbox transaction", () => {
+  it("claims an auto-sent upload once across tabs without consuming the text draft", async () => {
+    const id = crypto.randomUUID(), attachment = { id: "file-id", name: "note.txt", size: 4, mimeType: "text/plain" };
+    await db.uploads.put({ id, name: attachment.name, size: 4, mimeType: attachment.mimeType, lastModified: 0, uploaded: 4, attachment, sendOnComplete: true });
+    await db.drafts.put({ id: "composer", body: "still writing", attachments: [] });
+    const first = new SyncEngine(db, {} as SupabaseClient, "user"), second = new SyncEngine(db, {} as SupabaseClient, "user");
+    const record = { ...mutation(), id, operationId: id, body: "", attachments: [attachment] };
+    expect((await Promise.all([first, second].map(engine => engine.enqueue(record, { uploadIds: [id] })))).sort()).toEqual([false, true]);
+    expect(await db.pending.count()).toBe(1);
+    expect((await db.pending.get(id))?.mutation).toEqual(record);
+    expect(await db.uploads.count()).toBe(0);
+    expect((await db.drafts.get("composer"))?.body).toBe("still writing");
+    expect(await first.enqueue(mutation(), { draftId: "composer", uploadIds: [id] })).toBe(false);
+    expect((await db.drafts.get("composer"))?.body).toBe("still writing");
+  });
+  it("restores completed auto-send jobs and retries a local send failure without uploading again", async () => {
+    const id = crypto.randomUUID(), attachment = { id: "file-id", name: "note.txt", size: 4, mimeType: "text/plain" };
+    await db.uploads.put({ id, name: attachment.name, size: 4, mimeType: attachment.mimeType, lastModified: 0, uploaded: 4, attachment, sendOnComplete: true });
+    const publish = vi.fn().mockRejectedValueOnce(new Error("Storage unavailable")).mockImplementationOnce(async () => { await db.uploads.delete(id); });
+    const upload = new UploadManager(db, publish), request = vi.fn(); vi.stubGlobal("fetch", request);
+    try {
+      await upload.restore();
+      await vi.waitFor(() => expect(upload.getSnapshot()[0]).toMatchObject({ state: "failed", attachment }));
+      expect(upload.hasFile(id)).toBe(true);
+      await upload.resume(id);
+      await vi.waitFor(() => expect(upload.getSnapshot()).toEqual([]));
+      expect(publish).toHaveBeenCalledTimes(2);
+      expect(request).not.toHaveBeenCalled();
+    } finally { upload.stop(); }
+  });
   it.each([null, "another-account"])("does not send a cached outbox for an unconfirmed or different session: %s", async account => {
     vi.stubGlobal("navigator", { onLine: true });
     const request = vi.fn(); vi.stubGlobal("fetch", request);

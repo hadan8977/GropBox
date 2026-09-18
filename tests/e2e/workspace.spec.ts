@@ -147,6 +147,7 @@ test("cached app and history reopen offline without caching private responses", 
 
 test("folder drops upload nested file contents instead of a directory placeholder", async ({ page, context }, info) => {
   const rows: Message[] = []; await connect(context, rows); await open(page);
+  await page.getByRole("textbox", { name: "Message" }).fill("Keep this draft.");
   const folder = info.outputPath("Folder");
   await mkdir(join(folder, "Nested"), { recursive: true });
   await writeFile(join(folder, "Nested", "inside.txt"), "inside");
@@ -154,11 +155,15 @@ test("folder drops upload nested file contents instead of a directory placeholde
   const area = (await page.locator(".timeline").boundingBox())!;
   for (const type of ["dragEnter", "dragOver", "drop"] as const) await session.send("Input.dispatchDragEvent", { type, x: area.x + 60, y: area.y + 60, data: { items: [], files: [folder], dragOperationsMask: 1 } });
   await expect(page.getByText("inside.txt", { exact: true })).toBeVisible();
-  await expect(page.locator(".upload-list").getByText("Ready", { exact: false })).toBeVisible();
   await expect(page.locator(".upload-list").getByText("Folder", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("status", { name: "Sent", exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("Keep this draft.");
+  expect(rows).toHaveLength(1); expect(rows[0].body).toBe("");
   expect(rows[0].attachments).toEqual([{ id: "test-file-id", name: "inside.txt", size: 6, mimeType: "text/plain" }]);
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("Keep this draft.");
+  await expect(page.getByRole("button", { name: "Download inside.txt" })).toBeVisible();
+  expect(rows).toHaveLength(1);
 });
 test("preserves failed content and accepts a small file upload", async ({ page, context }) => {
   const rows: Message[] = []; await connect(context, rows, true); await open(page);
@@ -189,6 +194,93 @@ test("another browser retrieves the new message without a manual refresh", async
     await expect(receiver.getByRole("region", { name: "Messages" }).getByText("Available on the other device.", { exact: true })).toBeVisible({ timeout: 10_000 });
     expect(rows).toHaveLength(1);
   } finally { await second.close(); }
+});
+
+test("file downloads go to the browser without a save picker or blob buffering", async ({ page, context }) => {
+  const rows = history(1), link = "https://drive.google.com/uc?id=download-file&export=download";
+  rows[0].attachments = [{ id: "download-file", name: "Archive.zip", mimeType: "application/zip", size: 5 * 1024 ** 3 }];
+  await connect(context, rows);
+  await context.addInitScript(() => Object.defineProperty(window, "showSaveFilePicker", { value: () => { throw new Error("The app must not open a save picker"); } }));
+  let mediaRequests = 0;
+  await context.route("https://www.googleapis.com/drive/v3/files/download-file**", route => {
+    if (new URL(route.request().url()).searchParams.has("alt")) mediaRequests++;
+    return route.fulfill({ json: { webContentLink: link }, headers: { "access-control-allow-origin": "*" } });
+  });
+  await context.route(link, route => {
+    expect(route.request().headers().authorization).toBeUndefined();
+    return route.fulfill({ body: "download fixture", contentType: "application/zip", headers: { "content-disposition": 'attachment; filename="Archive.zip"' } });
+  });
+  await open(page);
+  const completed = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download Archive.zip" }).click();
+  const download = await completed;
+  expect(download.url()).toBe(link); expect(download.suggestedFilename()).toBe("Archive.zip");
+  expect(readFileSync((await download.path())!, "utf8")).toBe("download fixture");
+  expect(mediaRequests).toBe(0);
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+});
+
+for (const delayed of [false, true]) test(`file sharing passes the actual file to the system${delayed ? " after a fresh tap" : " immediately"}`, async ({ page, context }, info) => {
+  const rows = history(1);
+  rows[0].attachments = [{ id: "share-file", name: "Note.txt", mimeType: "text/plain", size: 5 }];
+  await connect(context, rows);
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "canShare", { configurable: true, value: (data: ShareData) => data.files?.[0]?.type === "text/plain" });
+    Object.defineProperty(navigator, "share", { configurable: true, value: async (data: ShareData) => {
+      if (!navigator.userActivation.isActive) throw new DOMException("Fresh tap required", "NotAllowedError");
+      const file = data.files![0];
+      Object.assign(window, { sharedFile: { name: file.name, type: file.type, text: await file.text(), url: data.url } });
+    } });
+  });
+  let reads = 0;
+  await context.route("https://www.googleapis.com/drive/v3/files/share-file**", route => { reads++; return route.fulfill({ body: "hello", contentType: "text/plain", headers: { "access-control-allow-origin": "*" } }); });
+  await open(page);
+  if (delayed) await page.evaluate(() => Object.defineProperty(navigator, "userActivation", { configurable: true, value: { isActive: false } }));
+  await page.getByRole("button", { name: "Share Note.txt" }).click();
+  if (delayed) {
+    await expect(page.getByRole("status").filter({ hasText: "Tap Share to continue" })).toBeVisible();
+    await page.screenshot({ path: info.outputPath("share-ready.png"), fullPage: true });
+    expect(await page.evaluate(() => "sharedFile" in window)).toBe(false);
+    await page.evaluate(() => Object.defineProperty(navigator, "userActivation", { configurable: true, value: { isActive: true } }));
+    await page.getByRole("button", { name: "Share Note.txt" }).click();
+  }
+  await expect.poll(() => page.evaluate(() => (window as unknown as { sharedFile?: unknown }).sharedFile)).toEqual({ name: "Note.txt", type: "text/plain", text: "hello", url: undefined });
+  expect(reads).toBe(1);
+  await expect(page.getByText("Tap Share to continue")).toHaveCount(0);
+});
+
+test("file sharing treats cancellation quietly and reports a blocked fresh tap", async ({ page, context }) => {
+  const rows = history(1);
+  rows[0].attachments = [{ id: "share-file", name: "Note.txt", mimeType: "text/plain", size: 5 }];
+  await connect(context, rows);
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "canShare", { value: () => true });
+    Object.defineProperty(navigator, "share", { value: async () => { throw new DOMException("Share rejected", (window as unknown as { blockShare?: boolean }).blockShare ? "NotAllowedError" : "AbortError"); } });
+  });
+  let reads = 0;
+  await context.route("https://www.googleapis.com/drive/v3/files/share-file**", route => { reads++; return route.fulfill({ body: "hello", contentType: "text/plain", headers: { "access-control-allow-origin": "*" } }); });
+  await open(page);
+  const button = page.getByRole("button", { name: "Share Note.txt" });
+  await button.click(); await expect(button).toBeEnabled();
+  await expect(page.locator(".notice")).toHaveCount(0);
+  await expect(page.getByText("Tap Share to continue")).toHaveCount(0);
+  await page.evaluate(() => Object.assign(window, { blockShare: true }));
+  await button.click(); await expect(page.getByText("Tap Share to continue")).toBeVisible();
+  await button.click(); await expect(page.getByText("Sharing blocked. Download the file instead.")).toBeVisible();
+  expect(reads).toBe(2);
+});
+
+test("unsupported file sharing is hidden", async ({ page, context }) => {
+  const rows = history(1);
+  rows[0].attachments = [{ id: "share-file", name: "Note.txt", mimeType: "text/plain", size: 5 }];
+  await connect(context, rows);
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "share", { value: async () => { throw new Error("Unsupported share must not run"); } });
+    Object.defineProperty(navigator, "canShare", { value: () => false });
+  });
+  await open(page);
+  await expect(page.getByRole("button", { name: "Download Note.txt" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Share Note.txt" })).toHaveCount(0);
 });
 
 test("downloads notes as plain text", async ({ page, context }) => {
@@ -339,8 +431,8 @@ test("glass adapts to dark mode and reduced effects", async ({ page, context }, 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-test("drag target and floating queue follow real transfer state", async ({ page, context }, info) => {
-  await connect(context, []); await open(page);
+test("drag target and floating queue auto-send after upload", async ({ page, context }, info) => {
+  const rows: Message[] = []; await connect(context, rows); await open(page);
   let release!: () => void;
   const prepared = new Promise<void>((resolve) => { release = resolve; });
   await context.route("**/api/drive/uploads", async (route) => {
@@ -363,16 +455,14 @@ test("drag target and floating queue follow real transfer state", async ({ page,
     await expect(progress).toHaveAttribute("aria-valuenow", "0");
     await expect(page.locator(".upload-list")).toHaveCSS("position", "absolute");
     await expect(page.getByRole("button", { name: "Pause Travel.txt" })).toBeVisible();
-    release();
-    await expect(progress).toHaveAttribute("aria-valuenow", "100");
-    await expect(page.locator(".transfer-check")).toHaveCSS("opacity", "1");
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+    expect(rows).toHaveLength(0);
     await expect(page.locator(".upload-list")).toHaveCSS("transform", "none");
-    const ring = (await progress.boundingBox())!, check = (await page.locator(".transfer-check").boundingBox())!;
-    expect(Math.abs(check.y + check.height / 2 - ring.y - ring.height / 2)).toBeLessThan(1);
     await page.screenshot({ path: info.outputPath("queue.png"), fullPage: true });
-    await page.getByRole("button", { name: "Send", exact: true }).click();
+    release();
     await expect(page.getByRole("status", { name: "Sent", exact: true })).toBeVisible();
     await expect(progress).toHaveCount(0);
+    expect(rows).toHaveLength(1); expect(rows[0].attachments[0].name).toBe("Travel.txt");
   } finally { release(); await transfer.dispose(); }
 });
 
