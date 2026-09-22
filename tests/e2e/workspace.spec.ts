@@ -665,13 +665,71 @@ test("saved appearance applies before hydration and blocked storage keeps contro
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
 });
 
+test("quiet materials keep a single focus edge without toolbar shells", async ({ page, context }, info) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  const rows = history(3);
+  rows[0].body = "Friday itinerary\nMeet at Terminal 2, 09:30.";
+  rows[1].body = "Keep the original spreadsheet.";
+  rows[2].body = "A few details for the other device.";
+  await connect(context, rows); await open(page);
+  await expect(page.getByText(rows[2].body as string, { exact: true })).toBeVisible();
+  const composer = page.locator(".composer"), searchbar = page.locator(".searchbar");
+  const input = page.getByRole("textbox", { name: "Message", exact: true }), search = page.getByRole("textbox", { name: "Search", exact: true });
+  const send = page.getByRole("button", { name: "Send", exact: true });
+  for (const colorScheme of ["dark", "light"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await expect(page.locator(".liquid-material")).toHaveAttribute("data-material", "ready");
+    await expect(composer).toHaveCSS("border-top-width", "0px");
+    expect(await composer.evaluate(el => getComputedStyle(el, "::before").content)).toBe("none");
+    expect(await composer.evaluate(el => getComputedStyle(el).boxShadow)).not.toContain("inset");
+    await expect(searchbar).toHaveCSS("box-shadow", "none");
+    await expect(page.locator(".topbar-actions")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(page.locator(".topbar-actions")).toHaveCSS("box-shadow", "none");
+    if (info.project.name === "mobile") {
+      await expect(page.locator(".mobile-filters")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await expect(page.locator(".mobile-filters")).toHaveCSS("box-shadow", "none");
+    }
+    await expect(send).toBeDisabled();
+    await expect(send).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await page.screenshot({ path: info.outputPath(`quiet-${colorScheme}-idle.png`), fullPage: true });
+    await search.focus(); await page.keyboard.press("Shift+Tab"); await page.keyboard.press("Tab");
+    await expect(search).toBeFocused();
+    await expect(searchbar).toHaveCSS("outline-width", "1px");
+    await expect(searchbar).toHaveCSS("outline-style", "solid");
+    await expect(searchbar).toHaveCSS("outline-offset", "-1px");
+    await expect(search).toHaveCSS("outline-style", "none");
+    await page.screenshot({ path: info.outputPath(`quiet-${colorScheme}-search.png`), fullPage: true });
+    await input.fill("The final itinerary, with the original dates and reservation number.");
+    await expect(composer).toHaveCSS("outline-width", "1px");
+    await expect(composer).toHaveCSS("outline-style", "solid");
+    await expect(composer).toHaveCSS("outline-offset", "-1px");
+    await expect(input).toHaveCSS("outline-style", "none");
+    await expect(send).toBeEnabled();
+    await expect(send).toHaveCSS("background-image", "none");
+    await expect(send).toHaveCSS("box-shadow", "none");
+    await page.screenshot({ path: info.outputPath(`quiet-${colorScheme}-compose.png`), fullPage: true });
+    const box = (await send.boundingBox())!;
+    expect(box.width).toBeGreaterThanOrEqual(44); expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await input.fill(""); await input.blur();
+  }
+  await page.emulateMedia({ colorScheme: "dark", contrast: "more", reducedMotion: "reduce" });
+  await input.focus();
+  await expect(composer).toHaveCSS("border-top-width", "1px");
+  await expect(composer).toHaveCSS("outline-width", "2px");
+  await expect(page.locator(".liquid-material")).toBeHidden();
+  await input.fill("Ready for the next device."); await send.click();
+  await expect.poll(() => rows.at(-1)?.body).toBe("Ready for the next device.");
+  expect(errors).toEqual([]);
+});
+
 test("reading panels stay opaque over dense messages and material corners stay rounded", async ({ page, context }, info) => {
   const rows = history(1);
   rows[0].body = "Flight and hotel details\n" + "Terminal 2. Keep the original dates. Check the reservation number.\n".repeat(18);
   await page.emulateMedia({ colorScheme: "light" });
   await connect(context, rows); await open(page);
   await expect(page.locator(".liquid-material")).toHaveAttribute("data-material", "ready");
-  await expect(page.locator(".liquid-material")).toHaveCSS("border-top-left-radius", "26px");
+  await expect(page.locator(".liquid-material")).toHaveCSS("border-top-left-radius", "22px");
   await expect(page.locator(".liquid-material")).toHaveCSS("overflow", "hidden");
   await expect(page.locator(".composer")).toHaveCSS("backdrop-filter", "saturate(1.2) blur(20px)");
   await page.locator(".composer").screenshot({ path: info.outputPath("composer-corners.png") });
