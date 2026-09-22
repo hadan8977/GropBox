@@ -1,0 +1,12 @@
+.bui-actions { position: relative; isolation: isolate; }
+.bui-actions > button, .bui-actions > a { position: relative; z-index: 1; min-height: 44px; }
+.bui-action-highlight { position: absolute; top: 0; inset-inline: 0; pointer-events: none; border-radius: 10px; background: var(--bui-hover, var(--hairline, rgba(128, 128, 128, .12))); transition: transform .22s cubic-bezier(.23, 1, .32, 1), opacity .15s ease; }
+.bui-feedback { position: relative; display: inline-grid; place-items: center; min-width: 44px; min-height: 44px; }
+.bui-feedback > span { grid-area: 1 / 1; display: inline-flex; transition: opacity .16s ease, transform .24s cubic-bezier(.32, .72, 0, 1); }
+.bui-feedback-success { opacity: 0; transform: scale(.55) rotate(-20deg); }
+.bui-feedback[data-success] { color: var(--bui-success, var(--success, currentColor)); }
+.bui-feedback[data-success] .bui-feedback-idle { opacity: 0; transform: scale(.65); }
+.bui-feedback[data-success] .bui-feedback-success { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .bui-action-highlight, .bui-feedback > span { transition: none; }
+}

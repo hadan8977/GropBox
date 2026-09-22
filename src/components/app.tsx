@@ -1,20 +1,21 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import { ArrowUp, ArrowDown, FilePlus2, FileText, FolderOpen, Inbox, LoaderCircle, Paperclip, Pin, RefreshCw, Search, UploadCloud, WifiOff, X, Pause, Play, Settings2 } from "lucide-react";
+import { ArrowUp, ArrowDown, FilePlus2, FileText, FolderOpen, Inbox, LoaderCircle, Paperclip, Pin, RefreshCw, Search, UploadCloud, WifiOff, X, Settings2 } from "lucide-react";
 import { browserClient } from "@/lib/supabase/browser";
 import { DriveCache, loadAccountHint, saveAccountHint, ACCOUNT_HINT_KEY, type AccountHint } from "@/lib/cache";
 import { SyncEngine } from "@/lib/sync";
 import { UploadManager, filesFromDrop } from "@/lib/uploads";
 import { api, readableError } from "@/lib/api";
-import { formatBytes, plainText, type Message, type Mutation, type VisibleMessage } from "@/lib/model";
+import { plainText, type Message, type Mutation, type VisibleMessage } from "@/lib/model";
 import { Editor } from "./editor";
 import { DocumentPanel } from "./document-panel";
 import { MessageCard } from "./message-card";
 import { useDialog } from "./use-dialog";
 import { useMessageActivity } from "./use-message-activity";
 import { startsTimeGroup } from "@/lib/timeline";
-import { TransferProgress } from "./transfer-progress";
+import { TransferQueue } from "./transfer-queue";
+import { LiquidMaterial } from "./liquid-material";
 
 async function login(reconnect = false) {
   const data = await api<{ url: string }>(`/api/auth/login${reconnect ? "?reconnect=1" : ""}`);
@@ -178,6 +179,15 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
     { id: "documents", name: "Notes", icon: FileText },
     { id: "pinned", name: "Pinned", icon: Pin },
   ] as const;
+  const transferControls = {
+    canResume: sessionAccount === user.id,
+    onPause: (id: string) => uploads.pause(id),
+    onResume: (id: string) => {
+      if (uploads.hasFile(id)) void uploads.resume(id).catch((e) => onError(readableError(e)));
+      else { resumeId.current = id; resumeInput.current?.click(); }
+    },
+    onRemove: (id: string) => { void uploads.remove(id).catch((e) => onError(readableError(e))); },
+  };
   return <div className="app-shell"
     onDragOver={(e) => { if (Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); setDragging("send"); } }}
     onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
@@ -247,6 +257,10 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
             if (activity.atBottom) activity.readLatest();
           }}><ArrowDown size={18} />{!showSearch && activity.unread.length > 0 && <span>{activity.unread.length} new</span>}</button>}
       </section>
+      <div className="compose-area">
+      {jobs.some(job => job.sendOnComplete) && <div className="transfer-dock">
+        <TransferQueue jobs={jobs.filter(job => job.sendOnComplete)} {...transferControls} />
+      </div>}
       <div className="composer-zone" data-dragging={dragging === "attach" || undefined}
         onDragOver={(e) => {
           if (!Array.from(e.dataTransfer.types).includes("Files")) return;
@@ -258,33 +272,19 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
           e.preventDefault(); e.stopPropagation(); setDragging(false);
           void filesFromDrop(e.dataTransfer, 30 - jobs.length).then((files) => addFiles(files)).catch((e) => onError(readableError(e)));
         }}>
-        {jobs.length > 0 && <div className="upload-list" aria-label="Uploads">
-          {jobs.map((job) => <div key={job.id} className="upload-job">
-            <TransferProgress job={job} />
-            <div><strong>{job.name}</strong><span>{formatBytes(job.size)} · {job.error ?? ({
-              staged: "Attached", queued: "Queued", uploading: `${Math.floor(job.size ? job.uploaded / job.size * 100 : 0)}%`,
-              paused: "Paused", failed: "Failed", done: "Ready",
-            }[job.state])}</span>
-            </div>
-            {job.state === "uploading"
-              ? <button className="icon-button" aria-label={`Pause ${job.name}`} onClick={() => uploads.pause(job.id)}><Pause size={18} /></button>
-              : ["failed", "paused"].includes(job.state)
-                ? <button className="icon-button" aria-label={`Resume ${job.name}`} disabled={sessionAccount !== user.id} onClick={() => {
-                    if (uploads.hasFile(job.id)) void uploads.resume(job.id).catch((e) => onError(readableError(e)));
-                    else { resumeId.current = job.id; resumeInput.current?.click(); }
-                  }}><Play size={18} /></button>
-                : ["done", "staged"].includes(job.state) ? null : <LoaderCircle size={18} className="spin" />}
-            <button className="icon-button" aria-label={`Remove ${job.name}`} onClick={() => void uploads.remove(job.id).catch((e) => onError(readableError(e)))}><X size={18} /></button>
-          </div>)}
-        </div>}
         <div className="composer">
+          <LiquidMaterial />
+          <TransferQueue jobs={jobs.filter(job => !job.sendOnComplete)} attached {...transferControls} />
+          <div className="composer-controls">
           <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} disabled={!draftReady || sending} aria-label="Attach files" title="Attach files"><Paperclip size={22} /></button>
           <Editor value={body} onChange={setBody} onSend={() => void send()} onFiles={addFiles} disabled={!draftReady || sending} />
-          <button className="send-button" aria-label="Send" title="Send" onClick={() => void send()}
+          <button className="send-button" aria-label="Send" aria-busy={sending} title="Send" onClick={() => void send()}
             disabled={!draftReady || sending || (!body.trim() && !jobs.some((job) => !job.sendOnComplete))}>
             {sending ? <LoaderCircle size={22} className="spin" /> : <ArrowUp size={24} />}
           </button>
+          </div>
         </div>
+      </div>
       </div>
       {dragging === "send" && <div className="drop-overlay"><div className="drop-orbit"><UploadCloud size={52} /></div><h2>Drop files</h2></div>}
     </main>

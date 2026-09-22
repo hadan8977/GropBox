@@ -168,7 +168,7 @@ test("folder drops upload nested file contents instead of a directory placeholde
 test("preserves failed content and accepts a small file upload", async ({ page, context }) => {
   const rows: Message[] = []; await connect(context, rows, true); await open(page);
   await page.locator('input[aria-label="Choose files"]').setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello drive") });
-  await expect(page.locator(".upload-list").getByText("Attached", { exact: false })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Attachments", exact: true })).toBeVisible();
   await page.getByRole("textbox", { name: "Message" }).fill("Keep these unsent changes."); await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByRole("status", { name: "Not sent" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Messages" }).getByText("Keep these unsent changes.", { exact: true })).toBeVisible();
@@ -205,7 +205,7 @@ for (const source of ["picker", "paste", "composer drop"] as const) test(`${sour
         }
       } finally { await data.dispose(); }
     }
-    await expect(page.locator(".upload-list").getByText("Attached", { exact: false })).toBeVisible();
+    await expect(page.locator(".composer").getByRole("region", { name: "Attachments", exact: true })).toBeVisible();
     await expect(page.getByRole("img", { name: "Attached notes.txt" })).toBeVisible();
     expect(starts).toBe(0); expect(rows).toHaveLength(0);
     if (source === "composer drop") {
@@ -415,6 +415,72 @@ function history(count: number): Message[] {
   });
 }
 
+test("copies message text in one click, including offline notes and attachment captions", async ({ page, context }, info) => {
+  const rows = history(4);
+  const text = "First line\n\n第二行 👋\nhttps://example.com/?a=1&b=2";
+  rows[0].body = text;
+  rows[1] = { ...rows[1], kind: "document", format: "rich", title: "Note title", body: { type: "doc", content: [
+    { type: "paragraph", content: [{ type: "text", text: "Bold text", marks: [{ type: "bold" }] }, { type: "hardBreak" }, { type: "text", text: "Next line" }] },
+    { type: "paragraph", content: [{ type: "text", text: "Another paragraph" }] },
+  ] } };
+  const file: Attachment = { id: "copy-test-file", name: "Reference.pdf", size: 100, mimeType: "application/pdf" };
+  rows[2] = { ...rows[2], body: "Keep this caption.", attachments: [file] };
+  rows[3] = { ...rows[3], body: "", attachments: [{ ...file, id: "file-only", name: "File only.pdf" }] };
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://localhost:3100" });
+  await connect(context, rows); await open(page);
+  await expect(page.getByText("File only.pdf", { exact: true })).toBeVisible();
+  await context.setOffline(true);
+  const cards = page.getByRole("article");
+  await expect(page.getByRole("button", { name: "Copy text", exact: true })).toHaveCount(3);
+  for (const [index, expected] of [text, "Bold text\nNext line\nAnother paragraph", "Keep this caption."].entries()) {
+    const card = cards.nth(index), copy = card.getByRole("button", { name: "Copy text", exact: true });
+    await expect(copy).toBeVisible();
+    await expect(copy).toHaveCSS("opacity", "1");
+    const target = (await copy.boundingBox())!;
+    expect(target.width).toBeGreaterThanOrEqual(44); expect(target.height).toBeGreaterThanOrEqual(44);
+    const before = (await card.locator(".message-bubble").boundingBox())!;
+    if (info.project.name === "mobile") await copy.tap(); else await copy.click();
+    await expect(card.getByRole("status").filter({ hasText: "Copied" })).toHaveText("Copied");
+    await expect(copy).toHaveAttribute("title", "Copied");
+    expect(await page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n"))).toBe(expected);
+    expect((await card.locator(".message-bubble").boundingBox())!.height).toBe(before.height);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath("copy-text.png"), fullPage: true });
+  await expect(cards.nth(2).getByRole("button", { name: "Copy text" })).toHaveAttribute("title", "Copy text");
+  await cards.nth(3).getByRole("button", { name: "Message actions" }).click();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+for (const failure of ["denied", "unavailable"] as const) {
+  test(`copy text handles ${failure} clipboard access and supports keyboard retry`, async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://localhost:3100" });
+    await connect(context, history(1)); await open(page);
+    await page.evaluate((mode) => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: mode === "unavailable" ? undefined : {
+        writeText: () => Promise.reject(new DOMException("Clipboard blocked", "NotAllowedError")),
+      } });
+    }, failure);
+    const copy = page.getByRole("button", { name: "Copy text", exact: true });
+    const notice = page.getByRole("alert").filter({ hasText: "Could not copy." });
+    await copy.focus(); await page.keyboard.press("Enter");
+    await expect(notice).toHaveText("Could not copy. Select the text to copy manually.");
+    await expect(copy).toBeEnabled();
+    await expect(copy).toHaveAttribute("title", "Copy text");
+    await expect(page.getByRole("status").filter({ hasText: "Copied" })).toHaveCount(0);
+    await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible();
+    await page.evaluate(() => { Reflect.deleteProperty(navigator, "clipboard"); });
+    await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await copy.focus(); await page.keyboard.press("Space");
+    await expect(copy).toHaveAttribute("title", "Copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Saved message 1");
+    await expect(notice).toHaveCount(0);
+  });
+}
+
 test("groups by time and keeps actions out of message spacing", async ({ page, context }, info) => {
   const rows = history(3);
   rows[2].created_at = "2026-09-14T08:07:00Z";
@@ -429,6 +495,14 @@ test("groups by time and keeps actions out of message spacing", async ({ page, c
   await expect(menu.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
   expect((await bubble.boundingBox())!.height).toBe(before.height);
   await expect(menu).toHaveCSS("opacity", "1");
+  await menu.getByRole("button", { name: "Copy", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(menu.getByRole("button", { name: "Pin", exact: true })).toBeFocused();
+  await expect.poll(() => menu.evaluate(element => {
+    const highlight = element.querySelector(".bui-action-highlight")!.getBoundingClientRect();
+    const button = document.activeElement!.getBoundingClientRect();
+    return Math.abs(highlight.top - button.top);
+  })).toBeLessThan(1);
   await page.screenshot({ path: info.outputPath("actions.png"), fullPage: true });
   await menu.getByRole("button", { name: "Pin", exact: true }).click();
   await expect(menu).toHaveCount(0);
@@ -474,16 +548,81 @@ test("glass adapts to dark mode and reduced effects", async ({ page, context }, 
   await connect(context, history(3)); await open(page);
   await expect(page.getByText("Saved message 3", { exact: true })).toBeVisible();
   await expect(page.getByText("Saved message 3", { exact: true })).toBeInViewport();
-  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(25, 30, 40)");
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(23, 23, 23)");
   await expect(page.locator(".composer")).toHaveCSS("transition-duration", "0s");
+  await expect(page.locator(".liquid-material canvas")).toHaveCount(0);
   await page.screenshot({ path: info.outputPath("dark.png"), fullPage: true });
   const session = await context.newCDPSession(page);
   await session.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-transparency", value: "reduce" }, { name: "prefers-contrast", value: "more" }] });
   await expect(page.locator(".composer")).toHaveCSS("backdrop-filter", "none");
+  await expect(page.locator(".liquid-material")).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-test("drag target and floating queue auto-send after upload", async ({ page, context }, info) => {
+test("liquid material renders once, responds to focus and settles without affecting input", async ({ page, context }, info) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  const rows = history(3);
+  rows[0].body = "Flight details for Friday\nMeet at Terminal 2, 09:30.";
+  rows[1].body = "https://example.com/itinerary";
+  rows[2].body = "Keep the original spreadsheet too.";
+  await connect(context, rows); await open(page);
+  const material = page.locator(".liquid-material"), input = page.getByRole("textbox", { name: "Message", exact: true });
+  await expect(material).toHaveAttribute("data-material", "ready");
+  await expect(material.locator("canvas")).toHaveCount(1);
+  const frame = () => material.evaluate(element => (element as import("@paper-design/shaders").PaperShaderElement).paperShaderMount!.getCurrentFrame());
+  const initial = await frame();
+  await page.waitForTimeout(200);
+  expect(await frame()).toBe(initial);
+  const pixels = await material.locator("canvas").evaluate(canvas => (canvas as HTMLCanvasElement).width * (canvas as HTMLCanvasElement).height);
+  expect(pixels).toBeGreaterThan(0); expect(pixels).toBeLessThanOrEqual(181_000);
+  await input.focus();
+  await expect.poll(frame).toBeGreaterThan(initial);
+  await input.fill("Send the final version when you arrive.");
+  await page.waitForTimeout(1600);
+  const settled = await frame();
+  await input.pressSequentially(" Thanks.");
+  await page.waitForTimeout(200);
+  expect(await frame()).toBe(settled);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await page.getByRole("textbox", { name: "Search" }).focus();
+  await page.screenshot({ path: info.outputPath("pearl-light.png"), fullPage: true });
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(material).toHaveAttribute("data-material", "ready");
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(23, 23, 23)");
+  await page.screenshot({ path: info.outputPath("pearl-dark.png"), fullPage: true });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(material.locator("canvas")).toHaveCount(0);
+  await expect(input).toHaveValue("Send the final version when you arrive. Thanks.");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect.poll(() => rows.length).toBe(4);
+  expect(errors).toEqual([]);
+});
+
+test("liquid material falls back after context loss and blocked GPU access", async ({ page, context }) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  const rows = history(1); await connect(context, rows); await open(page);
+  const material = page.locator(".liquid-material");
+  await expect(material).toHaveAttribute("data-material", "ready");
+  await material.locator("canvas").evaluate(canvas => (canvas as HTMLCanvasElement).getContext("webgl2")!.getExtension("WEBGL_lose_context")!.loseContext());
+  await expect(material).toHaveAttribute("data-material", "static");
+  await expect(material.locator("canvas")).toHaveCount(0);
+  await context.addInitScript(() => {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, type: string, ...args: unknown[]) {
+      return type.startsWith("webgl") ? null : Reflect.apply(getContext, this, [type, ...args]);
+    } as typeof getContext;
+  });
+  const fallback = page.waitForEvent("console", { predicate: message => message.text().includes("Liquid material unavailable") });
+  await page.reload(); await fallback;
+  await expect(material).toHaveAttribute("data-material", "static");
+  await expect(material.locator("canvas")).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Works without a GPU");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect.poll(() => rows.at(-1)?.body).toBe("Works without a GPU");
+  expect(errors).toEqual([]);
+});
+
+test("drag target and transfer queue auto-send after upload", async ({ page, context }, info) => {
   const rows: Message[] = []; await connect(context, rows); await open(page);
   let release!: () => void;
   const prepared = new Promise<void>((resolve) => { release = resolve; });
@@ -505,7 +644,9 @@ test("drag target and floating queue auto-send after upload", async ({ page, con
     await expect(page.getByRole("heading", { name: "Drop files" })).toHaveCount(0);
     const progress = page.getByRole("progressbar", { name: "Upload Travel.txt" });
     await expect(progress).toHaveAttribute("aria-valuenow", "0");
-    await expect(page.locator(".upload-list")).toHaveCSS("position", "absolute");
+    const timeline = (await page.getByRole("region", { name: "Messages", exact: true }).boundingBox())!;
+    const queue = (await page.getByRole("region", { name: "Transfers", exact: true }).boundingBox())!;
+    expect(queue.y).toBeGreaterThanOrEqual(timeline.y + timeline.height);
     await expect(page.getByRole("button", { name: "Pause Travel.txt" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
     expect(rows).toHaveLength(0);
@@ -516,6 +657,101 @@ test("drag target and floating queue auto-send after upload", async ({ page, con
     await expect(progress).toHaveCount(0);
     expect(rows).toHaveLength(1); expect(rows[0].attachments[0].name).toBe("Travel.txt");
   } finally { release(); await transfer.dispose(); }
+});
+
+test("transfer dock separates drafts, folds accessibly and exposes failed transfers for retry", async ({ page, context }, info) => {
+  const rows = history(1); await connect(context, rows);
+  const first = "Reference.pdf", second = "Meeting-recording.m4a";
+  const staged = "Flight-comparison-Singapore-to-London-September-2026.xlsx";
+  const prepared: string[] = [];
+  let releaseFirst!: () => void, releaseSecond!: () => void, failFirst = true;
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+  await context.route("**/api/drive/uploads", async route => {
+    const input = route.request().postDataJSON();
+    expect(input.action).toBe("prepare");
+    prepared.push(input.name);
+    if (input.name === first) {
+      await firstGate;
+      if (failFirst) { failFirst = false; return route.fulfill({ status: 503, json: { error: "Drive unavailable. Try again." } }); }
+    }
+    if (input.name === second) await secondGate;
+    const attachment = { id: input.uploadId, name: input.name, size: input.size, mimeType: input.mimeType };
+    await route.fulfill({ json: { fileId: attachment.id, folderId: "test-folder", attachment } });
+  });
+  try {
+    await open(page);
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("Compare these flights.\nKeep the original dates.");
+    await page.locator('input[aria-label="Choose files"]').setInputFiles([
+      { name: staged, mimeType: "application/octet-stream", buffer: Buffer.from("comparison") },
+      { name: "Itinerary.txt", mimeType: "text/plain", buffer: Buffer.from("dates") },
+    ]);
+    const attachments = page.getByRole("region", { name: "Attachments", exact: true });
+    await expect(attachments.getByText(staged, { exact: true })).toBeVisible();
+    const fold = attachments.getByRole("button", { name: "Collapse attachments" });
+    await fold.focus(); await page.keyboard.press("Enter");
+    await expect(attachments.getByRole("button", { name: "Expand attachments" })).toHaveAttribute("aria-expanded", "false");
+    await expect(attachments.getByRole("button", { name: `Remove ${staged}` })).toHaveCount(0);
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "Attach files", exact: true })).toBeFocused();
+    await attachments.getByRole("button", { name: "Expand attachments" }).click();
+    expect(prepared).toHaveLength(0);
+
+    const data = await page.evaluateHandle(({ first, second }) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["reference"], first, { type: "application/pdf" }));
+      transfer.items.add(new File(["audio"], second, { type: "audio/mp4" }));
+      return transfer;
+    }, { first, second });
+    try { await page.locator(".timeline").dispatchEvent("drop", { dataTransfer: data }); }
+    finally { await data.dispose(); }
+    const transfers = page.getByRole("region", { name: "Transfers", exact: true });
+    await expect(transfers.getByRole("button", { name: `Pause ${second}` })).toBeVisible();
+    await expect.poll(() => prepared.length).toBe(2);
+    expect(prepared).not.toContain(staged);
+    await expect(attachments.getByRole("img", { name: `Attached ${staged}` })).toBeVisible();
+    expect(await page.evaluate(() => {
+      const timeline = document.querySelector(".timeline")!.getBoundingClientRect();
+      const dock = document.querySelector(".transfer-queue")!.getBoundingClientRect();
+      return dock.top >= timeline.bottom;
+    })).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    for (const button of await page.locator(".upload-actions button").all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.width).toBeGreaterThanOrEqual(44); expect(box.height).toBeGreaterThanOrEqual(44);
+    }
+    await expect.poll(() => attachments.evaluate(element => element.getAnimations({ subtree: true }).filter(animation => animation.playState === "running").length)).toBe(0);
+    await expect(page.getByText("Saved message 1", { exact: true })).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeInViewport({ ratio: 1 });
+    await page.screenshot({ path: info.outputPath("transfer-dock.png"), fullPage: true });
+    await transfers.getByRole("button", { name: "Collapse transfers" }).click();
+    releaseFirst();
+    await expect(transfers.getByText("1 failed", { exact: true })).toBeVisible();
+    await expect(transfers.getByRole("button", { name: "Expand transfers" })).toHaveAttribute("aria-expanded", "false");
+    await transfers.getByRole("button", { name: "Expand transfers" }).click();
+    await expect(transfers.getByText("Drive unavailable. Try again.")).toBeVisible();
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect.poll(() => transfers.evaluate(element => element.getAnimations({ subtree: true }).filter(animation => animation.playState === "running").length)).toBe(0);
+    await page.screenshot({ path: info.outputPath("transfer-dock-dark.png"), fullPage: true });
+    await input.fill("A longer message\n".repeat(12));
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeInViewport({ ratio: 1 });
+    await input.fill("Compare these flights.\nKeep the original dates.");
+    await transfers.getByRole("button", { name: `Retry ${first}` }).click();
+    await expect.poll(() => rows.length).toBe(2);
+    await expect(transfers.getByRole("button", { name: `Pause ${second}` })).toBeVisible();
+    releaseSecond();
+    await expect(transfers).toHaveCount(0);
+    await expect.poll(() => rows.length).toBe(3);
+    await expect(input).toHaveValue("Compare these flights.\nKeep the original dates.");
+    expect(rows.slice(1).every(row => row.body === "" && row.attachments.length === 1)).toBe(true);
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect.poll(() => rows.length).toBe(4);
+    expect(rows[3].attachments.map(file => file.name)).toEqual([staged, "Itinerary.txt"]);
+    expect(rows[3].body).toBe("Compare these flights.\nKeep the original dates.");
+    await expect(input).toHaveValue("");
+    await expect(attachments).toHaveCount(0);
+  } finally { releaseFirst(); releaseSecond(); }
 });
 
 test("opens image preview without leaving the conversation", async ({ page, context }, info) => {

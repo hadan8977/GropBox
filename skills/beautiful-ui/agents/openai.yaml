@@ -1,0 +1,4 @@
+interface:
+  display_name: "Beautiful UI"
+  short_description: "Compact, truthful UI feedback and action primitives"
+  default_prompt: "Use $beautiful-ui to adapt compact controls and async feedback to this interface without simulated task states."

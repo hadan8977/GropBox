@@ -18,6 +18,7 @@ Files live under `GropBox/Files/YYYY-MM`; versioned message and note archives us
 ## Interaction and synchronization
 
 - One self-chat timeline with plain text, notes, files, search, pinning, edits, and logical deletion.
+- Text messages and notes have a visible one-click Copy button, including offline. It copies the body as plain text with line breaks, without titles, timestamps, or filenames. Clipboard access must be allowed by the browser; only a successful write shows the confirmation.
 - Consecutive bubbles have a 4 px gap. A five-minute gap or local date change starts a time group. New-message counts are session-local, not persistent cross-device read receipts.
 - The anonymous shell is prerendered and cached with its boot assets. Account-scoped IndexedDB history renders before a slow session refresh; a display-only account hint never authorizes network operations. Incoming messages do not wait for queued writes. No Drive scan is needed.
 - Realtime signals trigger an authenticated re-query. Reconnection, foregrounding, and periodic checks reconcile missed changes; polling falls back to approximately four seconds in the foreground.
@@ -29,6 +30,8 @@ Files live under `GropBox/Files/YYYY-MM`; versioned message and note archives us
 ## Files and archives
 
 Uploads go directly from browser to Drive in 8 MiB chunks, with up to two concurrent uploads and 30 queued files. Dropping outside the composer starts upload immediately and sends each completed file without touching the text draft. Dropping inside the composer, selecting Attach, or pasting files stages local attachments without uploading. One Send click uploads those attachments, then queues them with the text as a single message. Failed uploads keep the draft and attachments for retry; pausing waits for Resume. Upload progress is not a delivery receipt.
+
+Staged attachments stay inside the composer. Automatic transfers have a separate compact queue that reserves space below the timeline instead of covering messages. Multiple files can be collapsed; failed and paused counts remain visible in the summary. Progress comes from upload state, never animation timers.
 
 Folder drops recursively collect files, including nested directories, into the existing monthly Drive folder. Source directory hierarchy and empty folders are not recreated. Unreadable or over-limit folders are rejected before starting a partial upload.
 
@@ -72,3 +75,7 @@ Real Google sign-in, deployed RLS/Realtime, company-network access, phone behavi
 ## Design references
 
 The web interface adapts navigation-layer material, restraint, and motion principles from [Apple Design Skill](https://github.com/naplesblue/apple-design-skill), [Liquid Glass Skills](https://github.com/SohrabZ/liquid-glass-skills), and [Awesome Liquid Glass](https://github.com/GetStream/awesome-liquid-glass). CSS glass is not Apple's native material renderer; reduced motion, transparency, and contrast preferences have explicit fallbacks.
+
+Compact transfer rows, grouped composer attachments, and inline action feedback also take visual cues from [Beautiful UI](https://github.com/slev12397/beautiful-ui). These use GropBox's existing upload state, icons, and CSS, without the gallery's simulated tasks. The reusable [Beautiful UI skill](../skills/beautiful-ui/SKILL.md) includes plain-CSS React primitives; the app maintains its copies in `src/components/ui/`. GlideActions is adapted under the upstream MIT license.
+
+Dark mode uses neutral charcoal with warm-white controls. One lazily loaded Paper Warp canvas adds champagne, celadon, and mauve reflections to the composer, not the message list or page background. `@paper-design/shaders` is pinned to `0.0.81` ([Apache-2.0](../public/licenses/paper-shaders/LICENSE), [notice](../public/licenses/paper-shaders/NOTICE)). The pixel budget is 180,000; focus/drag entry runs a 1.4-second response, then speed zero stops the frame loop. Typing does not restart it. Hidden/offscreen rendering pauses, and teardown releases the renderer and context. A static CSS surface remains usable before loading, without WebGL2, after context loss, and with reduced motion. Reduced transparency or increased contrast removes the colored layer. No private content is sampled and no additional network service is involved.
