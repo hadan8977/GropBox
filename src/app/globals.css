@@ -32,6 +32,8 @@
   --ambient-violet: light-dark(rgba(209, 197, 220, .26), rgba(162, 153, 178, .065));
   --control-fill: linear-gradient(115deg, color-mix(in srgb, var(--pearl-green) 16%, transparent), transparent 35%, color-mix(in srgb, var(--pearl-violet) 12%, transparent)), var(--glass-sheen), var(--glass);
   --primary-ink: light-dark(#ffffff, #202020);
+  --logo-ink: light-dark(#505954, #f3f1ed);
+  --logo-fill: linear-gradient(145deg, color-mix(in srgb, var(--pearl-green) 32%, var(--logo-ink)), var(--logo-ink) 32%, color-mix(in srgb, var(--pearl-violet) 40%, var(--logo-ink)) 49%, color-mix(in srgb, var(--pearl-gold) 38%, var(--logo-ink)) 63%, var(--logo-ink));
   --glass-shadow: inset 0 1px 0 var(--glass-edge), inset 0 -1px 0 rgba(255, 255, 255, .12), 0 4px 14px rgba(30, 28, 24, .06);
   --r-pill: 999px;
   --r-thumb: 12px;
@@ -82,12 +84,29 @@ input, textarea { caret-color: var(--accent); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .brand { display: flex; align-items: center; gap: 10px; white-space: nowrap; user-select: none; }
-.brand img { width: 32px; height: 32px; object-fit: contain; }
-.brand span { font-size: 19px; font-weight: 650; letter-spacing: -.03em; }
+.brand > span:last-child { font-size: 19px; font-weight: 650; letter-spacing: -.03em; }
+.logo-mark { --logo-mask: url('/gropbox-mark.png'); position: relative; display: inline-block; flex-shrink: 0; width: 32px; height: 32px; vertical-align: middle; }
+.logo-mark img { display: block; width: 100%; height: 100%; object-fit: contain; filter: grayscale(1); }
+@supports (mask-image: url('/gropbox-mark.png')) {
+  .logo-mark img { opacity: 0; }
+  .logo-mark::before, .logo-mark::after { content: ""; position: absolute; inset: 0; pointer-events: none; mask: var(--logo-mask) center / contain no-repeat; }
+  .logo-mark::before { background: var(--logo-fill); }
+  .logo-mark::after { opacity: 0; background: linear-gradient(110deg, transparent 38%, rgba(255, 255, 255, .65) 49%, var(--pearl-gold) 51%, transparent 62%) 100% 50% / 300% 100%; }
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) and (prefers-contrast: no-preference) and (forced-colors: none) {
+  .logo-mark:hover { animation: logo-glow .9s ease-out; }
+  .logo-mark:hover::after { animation: logo-reflection .9s ease-out; }
+}
+@media (hover: none) and (prefers-reduced-motion: no-preference) and (prefers-contrast: no-preference) and (forced-colors: none) {
+  .logo-mark[data-pressed] { filter: drop-shadow(0 0 5px var(--pearl-gold)); }
+  .logo-mark[data-pressed]::after { opacity: .5; background-position: 50% 50%; }
+}
+@keyframes logo-glow { 0%, 100% { filter: drop-shadow(0 0 0 transparent); } 40% { filter: drop-shadow(0 0 5px var(--pearl-green)); } }
+@keyframes logo-reflection { 0% { opacity: 0; background-position: 100% 50%; } 25% { opacity: .65; } 100% { opacity: 0; background-position: 0% 50%; } }
 .welcome, .loading-page { min-height: 100dvh; display: grid; place-items: center; padding: var(--pad-x); }
 .loading-page { align-content: center; gap: 24px; color: var(--text-2); font-size: 13px; }
 .login-panel { text-align: center; width: min(100%, 360px); padding: 48px 28px; }
-.login-mark { width: 72px; height: 72px; }
+.login-mark { --logo-mask: url('/gropbox-icon.png'); width: 72px; height: 72px; }
 .login-panel h1 { font-size: clamp(32px, 5vw, 46px); font-weight: 650; letter-spacing: -.03em; margin: 18px 0 36px; }
 .login-button { width: 100%; min-height: 48px; }
 .setup-card { display: grid; gap: 12px; font-size: 14px; }
@@ -271,8 +290,8 @@ input, textarea { caret-color: var(--accent); }
   .mobile-brand, .mobile-settings { display: flex; }
   .topbar { min-height: 72px; padding: env(safe-area-inset-top) 16px 0; }
   .topbar-actions { gap: 0; }
-  .brand img { width: 28px; height: 28px; }
-  .brand span { font-size: 21px; }
+  .brand .logo-mark { width: 28px; height: 28px; }
+  .brand > span:last-child { font-size: 21px; }
   .searchbar { width: calc(100% - 32px); margin: 0 16px 12px; }
   .searchbar input { font-size: 16px; }
   .mobile-filters { position: relative; display: flex; margin: 0 16px 8px; padding: 3px; background: var(--control-fill); box-shadow: var(--glass-shadow); border-radius: var(--r-pill); }
@@ -296,8 +315,8 @@ input, textarea { caret-color: var(--accent); }
 @media (max-width: 360px) {
   .topbar { padding-inline: 12px; gap: 8px; }
   .brand { gap: 8px; }
-  .brand img { width: 24px; height: 24px; }
-  .brand span { font-size: 16px; }
+  .brand .logo-mark { width: 24px; height: 24px; }
+  .brand > span:last-child { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
@@ -314,6 +333,9 @@ input, textarea { caret-color: var(--accent); }
   :root { --glass: var(--surface); --window-fill: var(--surface); }
 }
 @media (prefers-contrast: more) {
+  .logo-mark::before { background: var(--text); }
+  .logo-mark, .logo-mark::after { animation: none; filter: none; }
+  .logo-mark::after { display: none; }
   :root { --hairline: var(--faint); --text-2: var(--text); --glass: var(--surface); --window-fill: var(--surface); --glass-sheen: none; }
   .document-panel, .settings-panel, .drop-overlay { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; border: 1px solid var(--text-2); }
   .message-more { opacity: 1; }
@@ -321,4 +343,9 @@ input, textarea { caret-color: var(--accent); }
   .composer { border-color: var(--text-2); }
   .main-panel, .sidebar { background: var(--window-fill); }
   .modal-backdrop { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+@media (forced-colors: active) {
+  .logo-mark img { opacity: 1; }
+  .logo-mark::before, .logo-mark::after { display: none; }
+  .logo-mark { animation: none; filter: none; }
 }

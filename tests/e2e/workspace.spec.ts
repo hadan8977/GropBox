@@ -66,6 +66,8 @@ test("shows Google login without fake history", async ({ page }) => {
   await page.route("https://gropbox-test.supabase.co/**", (route) => route.fulfill({ json: [] }));
   await page.goto("/"); await expect(page.getByRole("button", { name: "Continue with Google" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "GropBox" })).toBeVisible();
+  await expect(page.locator(".login-mark")).toHaveCSS("width", "72px");
+  await expect(page.locator(".login-mark img")).toHaveAttribute("src", "/gropbox-icon.png");
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(page.locator("body")).not.toHaveText(/test-server-only-key|test-secret/);
 });
@@ -558,6 +560,55 @@ test("glass adapts to dark mode and reduced effects", async ({ page, context }, 
   await expect(page.locator(".composer")).toHaveCSS("backdrop-filter", "none");
   await expect(page.locator(".liquid-material")).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("logo follows the material palette and its reflection settles", async ({ page, context }, info) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  await page.emulateMedia({ colorScheme: "light" });
+  await connect(context, history(3)); await open(page);
+  await expect(page.getByText("Saved message 3", { exact: true })).toBeVisible();
+  const logo = page.locator(".brand .logo-mark").filter({ visible: true });
+  await expect(logo).toHaveAttribute("aria-hidden", "true");
+  await expect(logo.locator("img")).toHaveCSS("filter", "grayscale(1)");
+  await expect(logo.locator("img")).toHaveCSS("opacity", "0");
+  const lightFill = await logo.evaluate(el => getComputedStyle(el, "::before").backgroundImage);
+  expect(lightFill).toContain("linear-gradient");
+  expect(await logo.evaluate(el => getComputedStyle(el, "::before").maskImage)).toContain("gropbox-mark.png");
+  await expect(page.locator(".liquid-material")).toHaveAttribute("data-material", "ready");
+  await page.screenshot({ path: info.outputPath("logo-light.png"), fullPage: true });
+  await page.getByRole("button", { name: "Switch to dark mode" }).click();
+  expect(await logo.evaluate(el => getComputedStyle(el, "::before").backgroundImage)).not.toBe(lightFill);
+  await page.screenshot({ path: info.outputPath("logo-dark.png"), fullPage: true });
+  const running = () => logo.evaluate(el => el.getAnimations({ subtree: true }).filter(a => a.playState === "running").length);
+  expect(await running()).toBe(0);
+  if (info.project.name === "desktop") {
+    await logo.hover();
+    await expect.poll(running).toBe(2);
+    await logo.evaluate(el => el.getAnimations({ subtree: true }).forEach(a => { a.pause(); a.currentTime = 350; }));
+    await logo.locator("..").screenshot({ path: info.outputPath("logo-reflection.png") });
+    await logo.evaluate(el => el.getAnimations({ subtree: true }).forEach(a => a.play()));
+    await expect.poll(running).toBe(0);
+    expect(await logo.evaluate(el => getComputedStyle(el, "::after").opacity)).toBe("0");
+  } else {
+    const session = await context.newCDPSession(page), box = (await logo.boundingBox())!;
+    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2 }] });
+    await expect(logo).not.toHaveCSS("filter", "none");
+    await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect(logo).toHaveCSS("filter", "none");
+  }
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.mouse.move(0, 0); await logo.hover();
+  expect(await running()).toBe(0);
+  expect(await logo.evaluate(el => getComputedStyle(el, "::after").opacity)).toBe("0");
+  await page.emulateMedia({ contrast: "more" });
+  expect(await logo.evaluate(el => getComputedStyle(el, "::before").backgroundImage)).toBe("none");
+  await page.emulateMedia({ forcedColors: "active" });
+  await expect(logo.locator("img")).toHaveCSS("opacity", "1");
+  expect(await logo.evaluate(el => getComputedStyle(el, "::before").display)).toBe("none");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Keep the original file.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
 });
 
 test("appearance can be switched explicitly, remembered and returned to System", async ({ page, context }, info) => {

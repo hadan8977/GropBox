@@ -23,7 +23,14 @@ async function login(reconnect = false) {
   const data = await api<{ url: string }>(`/api/auth/login${reconnect ? "?reconnect=1" : ""}`);
   window.location.assign(data.url);
 }
-function Brand() { return <div className="brand"><img src="/gropbox-mark.png" alt="" /><span>GropBox</span></div>; }
+function Logo({ large = false }: { large?: boolean }) {
+  const [pressed, setPressed] = useState(false);
+  return <span className={`logo-mark${large ? " login-mark" : ""}`} aria-hidden="true" data-pressed={pressed || undefined}
+    onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerCancel={() => setPressed(false)} onPointerLeave={() => setPressed(false)}>
+    <img src={large ? "/gropbox-icon.png" : "/gropbox-mark.png"} alt="" />
+  </span>;
+}
+function Brand() { return <div className="brand"><Logo /><span>GropBox</span></div>; }
 
 type TimelineContext = { showSearch: boolean; hasMore: boolean; busy: boolean; online: boolean; count: number; engine: SyncEngine };
 function HistoryHeader({ context }: { context?: TimelineContext }) {
@@ -52,7 +59,7 @@ function Welcome({ configured, error }: { configured: boolean; error?: string })
   };
   return <main className="welcome">
     <section className="login-panel">
-      <img className="login-mark" src="/gropbox-icon.png" alt="" />
+      <Logo large />
       <h1>GropBox</h1>
       {configured
         ? <button className="primary login-button" onClick={() => void start()} disabled={busy}>
