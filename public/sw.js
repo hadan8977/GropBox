@@ -1,6 +1,6 @@
 // The root page is build-time, anonymous HTML. Private data lives in account-scoped
 // IndexedDB; auth, APIs, RSC requests, and Drive traffic never enter this cache.
-const CACHE = "gropbox-shell-v3";
+const CACHE = "gropbox-shell-v4";
 let refreshing;
 async function asset(cache, request) {
   const saved = await cache.match(request);
@@ -28,7 +28,7 @@ function refreshShell(cache) {
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
-    await cache.addAll(["/offline.html", "/icon.svg"]);
+    await cache.addAll(["/offline.html", "/gropbox-mark.png", "/gropbox-icon.png", "/gropbox-apple-icon.png"]);
     await refreshShell(cache).catch(() => console.warn("App cache will retry when reachable."));
     await self.skipWaiting();
   })());
@@ -42,7 +42,7 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/_next/static/") || url.pathname === "/icon.svg") {
+  if (url.pathname.startsWith("/_next/static/") || ["/gropbox-mark.png", "/gropbox-icon.png", "/gropbox-apple-icon.png"].includes(url.pathname)) {
     event.respondWith(caches.open(CACHE).then(cache => asset(cache, event.request)));
   } else if (event.request.mode === "navigate" && url.pathname === "/") {
     const cache = caches.open(CACHE);

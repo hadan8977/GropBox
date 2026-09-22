@@ -1,13 +1,14 @@
 "use client";
 import { useEffect, useRef } from "react";
 import type { ShaderMount } from "@paper-design/shaders";
+import { useAppearance } from "./appearance";
 
 /** A decorative enhancement; the composer never waits for this renderer. */
 export function LiquidMaterial() {
   const host = useRef<HTMLDivElement>(null);
+  const { dark } = useAppearance();
   useEffect(() => {
     const element = host.current!, composer = element.parentElement!;
-    const theme = matchMedia("(prefers-color-scheme: dark)");
     const reductions = ["(prefers-reduced-motion: reduce)", "(prefers-reduced-transparency: reduce)", "(prefers-contrast: more)"].map(query => matchMedia(query));
     let mount: ShaderMount | undefined, generation = 0, failed = false;
     let loadTimer: number | undefined, settleTimer: number | undefined;
@@ -49,7 +50,7 @@ export function LiquidMaterial() {
         void (async () => {
           const createRenderer = await (await import("@/lib/liquid-renderer")).loadLiquidRenderer();
           if (generation !== current) return;
-          mount = createRenderer(element, theme.matches);
+          mount = createRenderer(element, dark);
           mount.canvasElement.addEventListener("webglcontextlost", unavailable);
           element.dataset.material = "ready";
         })().catch(() => {
@@ -66,7 +67,6 @@ export function LiquidMaterial() {
       else if (!mount) refresh();
     };
     refresh();
-    theme.addEventListener("change", refresh);
     reductions.forEach(query => query.addEventListener("change", refresh));
     composer.addEventListener("focusin", focus);
     composer.addEventListener("dragenter", drag);
@@ -75,12 +75,11 @@ export function LiquidMaterial() {
       ++generation;
       window.clearTimeout(loadTimer);
       release();
-      theme.removeEventListener("change", refresh);
       reductions.forEach(query => query.removeEventListener("change", refresh));
       composer.removeEventListener("focusin", focus);
       composer.removeEventListener("dragenter", drag);
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, []);
+  }, [dark]);
   return <div ref={host} className="liquid-material" aria-hidden="true" data-material="static" />;
 }

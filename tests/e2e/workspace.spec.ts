@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Message, Mutation, Attachment } from "../../src/lib/model";
+import { APPEARANCE_KEY } from "../../src/lib/appearance";
 
 // All provider traffic is mocked here. These tests verify UI integration, not deployed OAuth/Drive.
 const userId = "11111111-1111-4111-8111-111111111111";
@@ -131,13 +132,13 @@ test("incoming messages do not wait for a stalled outgoing write", async ({ page
 test("cached app and history reopen offline without caching private responses", async ({ page, context }) => {
   await connect(context, history(1)); await open(page);
   await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible();
-  await expect.poll(() => page.evaluate(async () => Boolean(navigator.serviceWorker.controller && await (await caches.open('gropbox-shell-v3')).match('/'))), { timeout: 15000 }).toBe(true);
+  await expect.poll(() => page.evaluate(async () => Boolean(navigator.serviceWorker.controller && await (await caches.open('gropbox-shell-v4')).match('/'))), { timeout: 15000 }).toBe(true);
   const cache = await page.evaluate(async () => {
-    const store = await caches.open('gropbox-shell-v3');
+    const store = await caches.open('gropbox-shell-v4');
     return { html: await (await store.match('/'))!.text(), paths: (await store.keys()).map(request => new URL(request.url).pathname) };
   });
   expect(cache.html).not.toMatch(/demo@example.com|test-session-refresh|test-server-only-key/);
-  expect(cache.paths.every(path => path === '/' || path === '/offline.html' || path === '/icon.svg' || path.startsWith('/_next/static/'))).toBe(true);
+  expect(cache.paths.every(path => path === '/' || path === '/offline.html' || path === '/gropbox-mark.png' || path === '/gropbox-icon.png' || path === '/gropbox-apple-icon.png' || path.startsWith('/_next/static/'))).toBe(true);
   await context.setOffline(true);
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByText("Saved message 1", { exact: true })).toBeVisible({ timeout: 3000 });
@@ -557,6 +558,96 @@ test("glass adapts to dark mode and reduced effects", async ({ page, context }, 
   await expect(page.locator(".composer")).toHaveCSS("backdrop-filter", "none");
   await expect(page.locator(".liquid-material")).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("appearance can be switched explicitly, remembered and returned to System", async ({ page, context }, info) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  await page.emulateMedia({ colorScheme: "light" });
+  await connect(context, history(3)); await open(page);
+  const input = page.getByRole("textbox", { name: "Message", exact: true });
+  await input.fill("Keep my draft while changing appearance.");
+  await page.getByRole("button", { name: "Switch to dark mode" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(23, 23, 23)");
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#171717");
+  await expect(input).toHaveValue("Keep my draft while changing appearance.");
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Switch to light mode" })).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).filter({ visible: true }).click();
+  const choice = page.getByRole("combobox", { name: "Appearance" });
+  await expect(choice).toHaveValue("dark");
+  await choice.selectOption("light");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(250, 250, 249)");
+  await choice.selectOption("system");
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(23, 23, 23)");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(250, 250, 249)");
+  expect(await page.evaluate(key => localStorage.getItem(key), APPEARANCE_KEY)).toBe("system");
+  await page.keyboard.press("Escape");
+  if (info.project.name === "mobile") await page.setViewportSize({ width: 320, height: 640 });
+  const toggle = page.getByRole("button", { name: "Switch to dark mode" });
+  await expect(toggle).toBeInViewport({ ratio: 1 });
+  const box = (await toggle.boundingBox())!;
+  expect(box.width).toBeGreaterThanOrEqual(44); expect(box.height).toBeGreaterThanOrEqual(44);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath("appearance-controls.png"), fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+test("saved appearance applies before hydration and blocked storage keeps controls usable", async ({ page, context }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await connect(context, history(1));
+  await context.addInitScript(key => localStorage.setItem(key, "dark"), APPEARANCE_KEY);
+  await page.route("**/_next/static/**/*.js", route => route.abort());
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+  await page.unroute("**/_next/static/**/*.js");
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Switch to light mode" })).toBeVisible();
+  await page.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException("Blocked", "SecurityError"); }; });
+  await page.getByRole("button", { name: "Switch to light mode" }).click();
+  await expect(page.locator(".main-panel")).toHaveCSS("background-color", "rgb(250, 250, 249)");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Still editable");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+});
+
+test("reading panels stay opaque over dense messages and material corners stay rounded", async ({ page, context }, info) => {
+  const rows = history(1);
+  rows[0].body = "Flight and hotel details\n" + "Terminal 2. Keep the original dates. Check the reservation number.\n".repeat(18);
+  await page.emulateMedia({ colorScheme: "light" });
+  await connect(context, rows); await open(page);
+  await expect(page.locator(".liquid-material")).toHaveAttribute("data-material", "ready");
+  await expect(page.locator(".liquid-material")).toHaveCSS("border-top-left-radius", "26px");
+  await expect(page.locator(".liquid-material")).toHaveCSS("overflow", "hidden");
+  await expect(page.locator(".composer")).toHaveCSS("backdrop-filter", "saturate(1.2) blur(20px)");
+  await page.locator(".composer").screenshot({ path: info.outputPath("composer-corners.png") });
+  const logo = page.locator(".brand img").filter({ visible: true });
+  await expect(logo).toHaveAttribute("src", "/gropbox-mark.png");
+  expect(await logo.evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(64);
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute("href", "/gropbox-mark.png");
+  const manifest = await (await page.request.get("/manifest.webmanifest")).json();
+  expect(manifest.icons).toContainEqual({ src: "/gropbox-icon.png", sizes: "512x512", type: "image/png", purpose: "any" });
+  await page.getByRole("button", { name: "Settings", exact: true }).filter({ visible: true }).click();
+  const panel = page.getByRole("dialog", { name: "Settings" });
+  await expect(panel).toHaveCSS("opacity", "1");
+  await expect(panel).toHaveCSS("background-color", "rgb(248, 247, 245)");
+  await expect(panel.locator("..")).toHaveCSS("backdrop-filter", "blur(10px)");
+  await page.screenshot({ path: info.outputPath("readable-settings-light.png"), fullPage: true });
+  await page.getByRole("combobox", { name: "Appearance" }).selectOption("dark");
+  await expect(panel).toHaveCSS("background-color", "rgb(41, 40, 38)");
+  await page.screenshot({ path: info.outputPath("readable-settings-dark.png"), fullPage: true });
+  const session = await context.newCDPSession(page);
+  await session.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-transparency", value: "reduce" }] });
+  await expect(panel.locator("..")).toHaveCSS("backdrop-filter", "none");
+  await expect(panel).toHaveCSS("background-color", "rgb(41, 40, 38)");
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "New note", exact: true }).click();
+  await expect(page.locator(".document-panel")).toHaveCSS("background-color", "rgb(41, 40, 38)");
+  await page.getByRole("textbox", { name: "Note text" }).fill("A readable note");
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
 });
 
 test("liquid material renders once, responds to focus and settles without affecting input", async ({ page, context }, info) => {

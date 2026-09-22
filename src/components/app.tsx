@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import { ArrowUp, ArrowDown, FilePlus2, FileText, FolderOpen, Inbox, LoaderCircle, Paperclip, Pin, RefreshCw, Search, UploadCloud, WifiOff, X, Settings2 } from "lucide-react";
+import { ArrowUp, ArrowDown, FilePlus2, FileText, FolderOpen, Inbox, LoaderCircle, Paperclip, Pin, RefreshCw, Search, UploadCloud, WifiOff, X, Settings2, Sun, Moon } from "lucide-react";
 import { browserClient } from "@/lib/supabase/browser";
 import { DriveCache, loadAccountHint, saveAccountHint, ACCOUNT_HINT_KEY, type AccountHint } from "@/lib/cache";
 import { SyncEngine } from "@/lib/sync";
@@ -16,12 +16,14 @@ import { useMessageActivity } from "./use-message-activity";
 import { startsTimeGroup } from "@/lib/timeline";
 import { TransferQueue } from "./transfer-queue";
 import { LiquidMaterial } from "./liquid-material";
+import { useAppearance } from "./appearance";
+import { parseAppearance } from "@/lib/appearance";
 
 async function login(reconnect = false) {
   const data = await api<{ url: string }>(`/api/auth/login${reconnect ? "?reconnect=1" : ""}`);
   window.location.assign(data.url);
 }
-function Brand() { return <div className="brand"><img src="/icon.svg" alt="" /><span>GropBox</span></div>; }
+function Brand() { return <div className="brand"><img src="/gropbox-mark.png" alt="" /><span>GropBox</span></div>; }
 
 type TimelineContext = { showSearch: boolean; hasMore: boolean; busy: boolean; online: boolean; count: number; engine: SyncEngine };
 function HistoryHeader({ context }: { context?: TimelineContext }) {
@@ -50,7 +52,7 @@ function Welcome({ configured, error }: { configured: boolean; error?: string })
   };
   return <main className="welcome">
     <section className="login-panel">
-      <img className="login-mark" src="/icon.svg" alt="" />
+      <img className="login-mark" src="/gropbox-icon.png" alt="" />
       <h1>GropBox</h1>
       {configured
         ? <button className="primary login-button" onClick={() => void start()} disabled={busy}>
@@ -109,6 +111,7 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
   const [results, setResults] = useState<Message[]>([]), [searching, setSearching] = useState(false);
   const [error, setError] = useState(""), [documentState, setDocumentState] = useState<{ message?: Message }>();
   const [settings, setSettings] = useState(false), [dragging, setDragging] = useState<"send" | "attach" | false>(false);
+  const appearance = useAppearance();
   const showSearch = Boolean(query.trim()) || filter !== "all";
   const activity = useMessageActivity(engine, !showSearch && !settings && !documentState);
   const fileInput = useRef<HTMLInputElement>(null), resumeInput = useRef<HTMLInputElement>(null), resumeId = useRef<string>("");
@@ -215,6 +218,9 @@ function Workspace({ user, sessionAccount, authUnavailable }: { user: AccountHin
             <RefreshCw size={20} className={sync.busy ? "spin" : ""} />
           </button>
           <button className="icon-button" aria-label="New note" title="New note" onClick={() => setDocumentState({})}><FilePlus2 size={20} /></button>
+          <button className="icon-button" aria-label={appearance.dark ? "Switch to light mode" : "Switch to dark mode"} title={appearance.dark ? "Light mode" : "Dark mode"} onClick={() => appearance.change(appearance.dark ? "light" : "dark")}>
+            {appearance.dark ? <Sun size={20} /> : <Moon size={20} />}
+          </button>
           <button className="icon-button mobile-settings" aria-label="Settings" onClick={() => setSettings(true)}><Settings2 size={20} /></button>
         </div>
       </header>
@@ -301,10 +307,14 @@ function SettingsPanel({ email, onClose, onReconnect, onArchive, onLogout }: {
   email: string; onClose: () => void; onReconnect: () => void; onArchive: () => void; onLogout: () => void;
 }) {
   const panel = useRef<HTMLElement>(null);
+  const appearance = useAppearance();
   useDialog(panel, onClose);
   return <div className="modal-backdrop"><section ref={panel} className="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
     <header><h2>Settings</h2><button className="icon-button" aria-label="Close settings" onClick={onClose}><X size={20} /></button></header>
     <dl className="settings-list">
+      <div><dt><label htmlFor="appearance">Appearance</label></dt><dd><select id="appearance" value={appearance.preference} onChange={event => appearance.change(parseAppearance(event.target.value))}>
+        <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+      </select></dd></div>
       <div><dt>Account</dt><dd>{email}</dd></div>
       <div><dt>Messages</dt><dd>Supabase</dd></div>
       <div><dt>Files &amp; archives</dt><dd>Google Drive</dd></div>
