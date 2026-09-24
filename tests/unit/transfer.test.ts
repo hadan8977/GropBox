@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boundedBlob, DriveClient } from "@/lib/drive";
+import { boundedBlob, DriveClient, MAX_THUMBNAIL_BYTES } from "@/lib/drive";
 import { filesFromDrop } from "@/lib/uploads";
 
 describe("folder drops", () => {
@@ -30,6 +30,46 @@ describe("folder drops", () => {
 
 afterEach(() => vi.unstubAllGlobals());
 describe("bounded-memory transfers", () => {
+  it("fetches a private Drive thumbnail without downloading the original or following redirects", async () => {
+    const link = "https://lh3.googleusercontent.com/drive-storage/private-thumbnail=s220";
+    const request = vi.fn().mockResolvedValueOnce(Response.json({ thumbnailLink: link }))
+      .mockResolvedValueOnce(new Response("thumbnail", { headers: { "Content-Type": "image/jpeg" } }));
+    const image = await new DriveClient(async () => "test-access", request).thumbnail("file-id", new AbortController().signal);
+    expect(image?.type).toBe("image/jpeg"); expect(await image?.text()).toBe("thumbnail");
+    expect(request.mock.calls[0][0]).toContain("fields=thumbnailLink,trashed");
+    expect(request.mock.calls[1]).toEqual([link, expect.objectContaining({ redirect: "error", credentials: "omit", cache: "no-store", headers: { Authorization: "Bearer test-access" } })]);
+  });
+  it.each(["http://lh3.googleusercontent.com/private", "https://googleusercontent.com.evil.test/private", "https://lh3.googleusercontent.com.evil.test/private", "https://localhost/private", "https://user:secret@lh3.googleusercontent.com/private", "https://lh3.googleusercontent.com:444/private"])("rejects unsafe thumbnail target %s before sending credentials", async link => {
+    const request = vi.fn().mockResolvedValueOnce(Response.json({ thumbnailLink: link }));
+    await expect(new DriveClient(async () => "test-access", request).thumbnail("file-id", new AbortController().signal)).rejects.toThrow("Invalid thumbnail URL");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("does not fetch missing thumbnails or trashed files", async () => {
+    const request = vi.fn().mockResolvedValueOnce(Response.json({})).mockResolvedValueOnce(Response.json({ trashed: true, thumbnailLink: "https://lh3.googleusercontent.com/private" }));
+    const drive = new DriveClient(async () => "test-access", request);
+    expect(await drive.thumbnail("file-id", new AbortController().signal)).toBeUndefined();
+    await expect(drive.thumbnail("file-id", new AbortController().signal)).rejects.toThrow("File not found");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+  it.each(["text/html", "image/svg+xml"])("rejects active thumbnail content %s", async mime => {
+    const request = vi.fn().mockResolvedValueOnce(Response.json({ thumbnailLink: "https://lh3.googleusercontent.com/private" }))
+      .mockResolvedValueOnce(new Response("untrusted", { headers: { "Content-Type": mime } }));
+    await expect(new DriveClient(async () => "test-access", request).thumbnail("file-id", new AbortController().signal)).rejects.toThrow("Preview unavailable");
+  });
+  it("bounds actual thumbnail bytes, regardless of Content-Length", async () => {
+    const request = vi.fn().mockResolvedValueOnce(Response.json({ thumbnailLink: "https://lh3.googleusercontent.com/private" }))
+      .mockResolvedValueOnce(new Response(new Uint8Array(MAX_THUMBNAIL_BYTES + 1), { headers: { "Content-Type": "image/png", "Content-Length": "1" } }));
+    await expect(new DriveClient(async () => "test-access", request).thumbnail("file-id", new AbortController().signal)).rejects.toThrow("preview limit");
+  });
+  it("refreshes an expired thumbnail credential once", async () => {
+    const request = vi.fn().mockResolvedValueOnce(Response.json({ thumbnailLink: "https://lh3.googleusercontent.com/private" }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response("thumbnail", { headers: { "Content-Type": "image/png" } }));
+    const token = vi.fn(async (force?: boolean) => force ? "new-access" : "old-access");
+    await new DriveClient(token, request).thumbnail("file-id", new AbortController().signal);
+    expect(token).toHaveBeenLastCalledWith(true);
+    expect(request.mock.calls[2][1].headers.Authorization).toBe("Bearer new-access");
+  });
   it("uses Drive's browser download link without fetching file bytes or adding an access token", async () => {
     const link = "https://drive.google.com/uc?id=file-id&export=download";
     const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({ webContentLink: link })));

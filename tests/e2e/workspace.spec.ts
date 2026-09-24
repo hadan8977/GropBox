@@ -971,19 +971,121 @@ test("opens image preview without leaving the conversation", async ({ page, cont
     return canvas.toDataURL("image/png").split(",")[1];
   });
   await connect(context, rows);
-  await context.route("https://www.googleapis.com/drive/v3/files/preview-file**", (route) => route.fulfill({ contentType: "image/png", body: Buffer.from(data, "base64"), headers: { "access-control-allow-origin": "*" } }));
+  let originals = 0, thumbnails = 0;
+  await context.route("**/api/drive/thumbnail?fileId=preview-file", route => { thumbnails++; return route.fulfill({ contentType: "image/png", body: Buffer.from(data, "base64") }); });
+  await context.route("https://www.googleapis.com/drive/v3/files/preview-file**", route => {
+    if (route.request().method() !== "OPTIONS") originals++;
+    return route.fulfill({ contentType: "image/png", body: Buffer.from(data, "base64"), headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*" } });
+  });
   await open(page);
   const preview = page.getByRole("button", { name: "Preview Coast.png" });
-  await expect(preview).toBeVisible();
+  await expect(preview).toBeEnabled();
+  await expect(preview.locator("img")).toHaveJSProperty("naturalWidth", 960);
+  expect(originals).toBe(0); expect(thumbnails).toBe(1);
   await preview.scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath("glass-workspace.png"), fullPage: true });
   await preview.click();
   const dialog = page.getByRole("dialog", { name: "Preview Coast.png" });
   await expect(dialog).toHaveCSS("opacity", "1");
   await expect(dialog.getByRole("img", { name: "Coast.png" })).toBeVisible();
+  await expect.poll(() => originals).toBe(1);
+  await expect(dialog.getByText("Loading original…", { exact: true })).toHaveCount(0);
   await page.screenshot({ path: info.outputPath("preview.png"), fullPage: true });
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(preview).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+const thumbnailPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jH1sAAAAASUVORK5CYII=", "base64");
+
+test("shows large image thumbnails and distinct file types in both themes", async ({ page, context }, info) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  await page.emulateMedia({ colorScheme: "light" });
+  const rows = history(2);
+  rows[0].body = "";
+  rows[0].attachments = [
+    { id: "pdf", name: "Reference.pdf", mimeType: "application/pdf", size: 1000 },
+    { id: "sheet", name: "Budget.xlsx", mimeType: "application/octet-stream", size: 2000 },
+    { id: "slides", name: "Brief.pptx", mimeType: "application/octet-stream", size: 3000 },
+    { id: "zip", name: "Backup.zip", mimeType: "application/zip", size: 4000 },
+    { id: "audio", name: "Recording.m4a", mimeType: "audio/mp4", size: 5000 },
+    { id: "video", name: "Clip.mov", mimeType: "video/quicktime", size: 6000 },
+    { id: "code", name: "settings.json", mimeType: "text/plain", size: 7000 },
+  ];
+  rows[1].body = "";
+  rows[1].attachments = [{ id: "large-photo", name: "Photo.HEIC", mimeType: "application/octet-stream", size: 32 * 1024 ** 2 }];
+  await connect(context, rows);
+  let originals = 0;
+  await context.route("https://www.googleapis.com/drive/v3/files/**", route => { originals++; return route.abort(); });
+  await context.route("**/api/drive/thumbnail?fileId=large-photo", route => route.fulfill({ contentType: "image/png", body: thumbnailPng }));
+  await open(page);
+  const preview = page.getByRole("button", { name: "Preview Photo.HEIC" });
+  await expect(preview).toBeEnabled();
+  await expect(preview.locator("img")).toHaveJSProperty("naturalWidth", 1);
+  await preview.click();
+  const dialog = page.getByRole("dialog", { name: "Preview Photo.HEIC" });
+  await expect(dialog.getByText("Thumbnail", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  expect(originals).toBe(0);
+  for (const kind of ["PDF", "Spreadsheet", "Presentation", "Archive", "Audio", "Video", "Code"]) {
+    const icon = page.getByRole("img", { name: `${kind} file`, exact: true });
+    await icon.scrollIntoViewIfNeeded(); await expect(icon).toBeVisible();
+  }
+  for (const theme of ["light", "dark"] as const) {
+    if (theme === "dark") await page.getByRole("button", { name: "Switch to dark mode" }).click();
+    await page.getByRole("img", { name: "PDF file", exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`file-types-${theme}.png`), fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await page.locator('input[aria-label="Choose files"]').setInputFiles({ name: "Budget.xlsx", mimeType: "application/octet-stream", buffer: Buffer.from("fixture") });
+  await expect(page.getByRole("img", { name: "Attached Budget.xlsx", exact: true }).locator(".lucide-file-spreadsheet")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("keeps thumbnail failures local, retries, and reuses previews after filtering", async ({ page, context }) => {
+  const rows = history(1);
+  rows[0].attachments = [{ id: "retry-photo", name: "Photo.png", mimeType: "image/png", size: 100000 }];
+  await connect(context, rows);
+  let requests = 0;
+  await context.route("**/api/drive/thumbnail?fileId=retry-photo", route => {
+    requests++;
+    return requests === 1 ? route.fulfill({ status: 503, json: { error: "Preview unavailable." } })
+      : route.fulfill({ contentType: "image/png", body: thumbnailPng });
+  });
+  await open(page);
+  await expect(page.getByRole("button", { name: "Download Photo.png" })).toBeEnabled();
+  await expect(page.getByText("Preview unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status", { name: "Sent", exact: true })).toBeVisible();
+  await expect(page.getByText("Drafts are saved on this device.", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry preview Photo.png" }).click();
+  const preview = page.getByRole("button", { name: "Preview Photo.png" });
+  await expect(preview).toBeEnabled(); await expect(preview.locator("img")).toHaveJSProperty("naturalWidth", 1);
+  expect(requests).toBe(2);
+  await page.getByRole("button", { name: "Notes", exact: true }).filter({ visible: true }).click();
+  await expect(preview).toHaveCount(0);
+  await page.getByRole("button", { name: "All", exact: true }).filter({ visible: true }).click();
+  await expect(preview).toBeEnabled(); await expect(preview.locator("img")).toHaveJSProperty("naturalWidth", 1);
+  expect(requests).toBe(2);
+});
+
+test("loads thumbnails near the viewport without downloading offscreen originals", async ({ page, context }) => {
+  const rows = history(12);
+  for (let i = 0; i < rows.length; i++) {
+    rows[i].body = "";
+    rows[i].attachments = [{ id: `lazy-photo-${i}`, name: `Photo-${i}.png`, mimeType: "image/png", size: 200000 }];
+  }
+  await connect(context, rows);
+  const loaded = new Set<string>();
+  await context.route("**/api/drive/thumbnail?fileId=*", route => {
+    loaded.add(new URL(route.request().url()).searchParams.get("fileId")!);
+    return route.fulfill({ contentType: "image/png", body: thumbnailPng });
+  });
+  await open(page);
+  await expect(page.getByRole("button", { name: "Preview Photo-11.png", exact: true })).toBeEnabled();
+  expect(loaded.size).toBeLessThan(rows.length);
+  await page.locator('[data-virtuoso-scroller="true"]').evaluate(element => { element.scrollTop = 0; });
+  const first = page.getByRole("button", { name: "Preview Photo-0.png", exact: true });
+  await first.scrollIntoViewIfNeeded(); await expect(first).toBeEnabled();
+  expect(loaded.has("lazy-photo-0")).toBe(true);
 });

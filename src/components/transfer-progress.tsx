@@ -1,5 +1,6 @@
-import { Check, CircleAlert, FileText, Pause } from "lucide-react";
+import { Check, CircleAlert, Pause } from "lucide-react";
 import type { UploadJob } from "@/lib/uploads";
+import { FileTypeIcon } from "./file-type-icon";
 
 export function TransferProgress({ job, percent }: { job: UploadJob; percent: number }) {
   const staged = job.state === "staged";
@@ -8,6 +9,6 @@ export function TransferProgress({ job, percent }: { job: UploadJob; percent: nu
       <circle className="transfer-track" cx="22" cy="22" r="18" />
       <circle className="transfer-arc" cx="22" cy="22" r="18" pathLength="100" strokeDasharray="100" strokeDashoffset={100 - percent} />
     </svg>
-    <span className="transfer-symbol" aria-hidden="true">{job.state === "failed" ? <CircleAlert /> : job.state === "paused" ? <Pause /> : <FileText className="transfer-file" />}<Check className="transfer-check" /></span>
+    <span className="transfer-symbol" aria-hidden="true">{job.state === "failed" ? <CircleAlert /> : job.state === "paused" ? <Pause /> : <FileTypeIcon file={job} compact />}<Check className="transfer-check" /></span>
   </span>;
 }

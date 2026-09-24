@@ -1,7 +1,8 @@
-import { APP_ID, FILE_ID, attachmentSchema, type Attachment } from "./model";
+import { APP_ID, FILE_ID, attachmentSchema, canPreviewImage, type Attachment } from "./model";
 
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
+export const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024;
 const META_FIELDS = "id,name,mimeType,parents,appProperties,size,trashed,webContentLink";
 export type DriveFile = { id: string; name: string; mimeType: string; parents?: string[]; appProperties?: Record<string,string>; size?: string; trashed?: boolean; webContentLink?: string };
 export type Workspace = { root: string; history: string; documents: string; assets: string };
@@ -126,6 +127,29 @@ export class DriveClient {
   async download(id: string, signal?: AbortSignal) {
     // A large streamed download must not inherit the 30-second metadata deadline.
     return this.request(`${API}/files/${validId(id)}?alt=media`, { signal: signal ?? new AbortController().signal });
+  }
+  // Drive thumbnail URLs require credentials and are not browser-CORS endpoints.
+  // Only call this from the authenticated thumbnail route, never expose the URL.
+  async thumbnail(id: string, signal: AbortSignal): Promise<Blob | undefined> {
+    const file = await (await this.request(`${API}/files/${validId(id)}?fields=thumbnailLink,trashed`, { signal })).json();
+    if (file.trashed) throw new DriveError("File not found.", 404);
+    if (!file.thumbnailLink) return undefined;
+    const url = new URL(file.thumbnailLink);
+    if (url.protocol !== "https:" || !url.hostname.endsWith(".googleusercontent.com") || url.username || url.password || url.port) throw new Error("Invalid thumbnail URL.");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await this.requestFetch(url.href, {
+        signal, headers: { Authorization: `Bearer ${await this.token(attempt === 1)}` },
+        cache: "no-store", credentials: "omit", redirect: "error",
+      });
+      if (response.status === 401 && attempt === 0) { await response.body?.cancel(); continue; }
+      const mime = response.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() ?? "";
+      if (!response.ok || !canPreviewImage(mime)) {
+        await response.body?.cancel();
+        throw new DriveError("Preview unavailable.", response.ok ? 502 : response.status);
+      }
+      return boundedBlob(response, MAX_THUMBNAIL_BYTES, mime);
+    }
+    throw new Error("Preview unavailable.");
   }
   async downloadLink(id: string) {
     const file = await this.metadata(id);
